@@ -1,0 +1,4 @@
+aiogram>=3.13
+python-dotenv>=1.0
+psycopg2-binary>=2.9
+gspread>=6.0
