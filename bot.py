@@ -134,7 +134,7 @@ async def m_materials(cb: CallbackQuery):
 async def show_materials(msg: Message):
     await msg.answer("Что прислать?", reply_markup=kb([
         [("🛡 Чек-лист: как не попасть на скам", "go_antiscam")],
-        [("📕 Гайд: первые 30 дней стримерши", "go_guide")]]))
+        [("📕 Гайд: первые 30 дней ведущие", "go_guide")]]))
 
 # ---------------- Сценарии A и G: магниты ----------------
 async def run_antiscam(msg: Message, state: FSMContext = None):
@@ -218,7 +218,8 @@ async def test_answer(cb: CallbackQuery, state: FSMContext):
         if flag == "1":
             data["flags"].append(key)
     qn += 1
-    await state.update_data(**data, qn=qn)
+    data["qn"] = qn
+    await state.update_data(data)
     if qn < 10:
         await ask_test_q(cb.message, qn)
     else:
@@ -517,7 +518,7 @@ async def f_contact(msg: Message, state: FSMContext):
     else:
         await msg.answer(T.FR_DONE_COLD)
 
-# ---------------- Свободный текст, /help, названия агентств ----------------
+# ---------------- Свободный текст, /help, названия команд ----------------
 @router.callback_query(F.data == "noop")
 async def noop(cb: CallbackQuery):
     await cb.answer("Ок 🙂")
@@ -551,7 +552,7 @@ async def free_text(msg: Message, state: FSMContext):
     u = db.get_user(msg.from_user.id) or {}
     if "antiscam" in (u.get("magnets") or "") and len(msg.text) < 60:
         await notify(msg.bot, config.WORK_CHAT_ID,
-                     f"🔍 Проверка агентства от @{msg.from_user.username or msg.from_user.id}: {msg.text}")
+                     f"🔍 Проверка команды от @{msg.from_user.username or msg.from_user.id}: {msg.text}")
         db.log_event(msg.from_user.id, "agency_check", msg.text[:100])
         await msg.answer(T.AGENCY_NAME_ACK)
         return
