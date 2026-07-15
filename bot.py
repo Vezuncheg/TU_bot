@@ -8,7 +8,9 @@ from aiogram.filters import CommandStart, Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (Message, CallbackQuery, InlineKeyboardMarkup,
-                           InlineKeyboardButton, FSInputFile)
+                           InlineKeyboardButton, FSInputFile,
+                           ReplyKeyboardMarkup, KeyboardButton,
+                           BotCommand, BotCommandScopeDefault)
 from aiogram.exceptions import TelegramBadRequest
 
 import config, storage as db, texts as T
@@ -21,6 +23,17 @@ def kb(rows):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=t, callback_data=d) if not d.startswith("http")
          else InlineKeyboardButton(text=t, url=d) for t, d in row] for row in rows])
+
+# постоянное меню снизу (reply-клавиатура) — навигация всегда на виду
+MAIN_REPLY = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="🧭 Подходишь ли ты?")],
+        [KeyboardButton(text="📚 Материалы"), KeyboardButton(text="🤝 Партнёрство")],
+        [KeyboardButton(text="📢 Наш канал")],
+    ],
+    resize_keyboard=True,
+    input_field_placeholder="Выбери раздел или напиши вопрос…",
+)
 
 async def is_subscribed(bot: Bot, user_id: int) -> bool:
     try:
@@ -58,9 +71,8 @@ class Franchise(StatesGroup):
 
 # ---------------- /start и меню ----------------
 MENU_KB = kb([
-    [("🎬 Хочу стримить — кастинг", "m_stream")],
-    [("🧭 Тест: подхожу ли я для заработка", "go_test")],
-    [("📕 Полезные материалы", "m_materials")],
+    [("🧭 Подходишь ли ты для заработка? 💰", "m_stream")],
+    [("📚 Полезные материалы", "m_materials")],
     [("🤝 Партнёрство и франшиза", "m_franchise")],
     [("📢 Наш канал с реальными цифрами", config.CHANNEL_URL)],
 ])
@@ -74,9 +86,11 @@ async def start_deeplink(msg: Message, command: CommandObject, state: FSMContext
               "casting": run_casting_intro, "franchise": run_franchise_intro}
     handler = routes.get(src)
     if handler:
+        await msg.answer("Меню всегда снизу 👇", reply_markup=MAIN_REPLY)
         await handler(msg, state)
     else:
         await msg.answer(T.MENU_MAIN, reply_markup=MENU_KB)
+        await msg.answer("А это меню всегда под рукой 👇", reply_markup=MAIN_REPLY)
 
 @router.message(CommandStart())
 async def start_plain(msg: Message):
@@ -108,8 +122,8 @@ async def cmd_casting(msg: Message, state: FSMContext):
 async def m_stream(cb: CallbackQuery):
     db.log_event(cb.from_user.id, "menu_stream")
     await cb.message.answer(T.M2_STREAM, reply_markup=kb([
-        [("🧭 Проверить, подхожу ли я — тест 3 мин", "go_test")],
-        [("🎬 Сразу на кастинг", "go_casting")]]))
+        [("🧭 Пройти тест — 3 минуты ⏱", "go_test")],
+        [("🎬 Уже решил(а) — сразу на кастинг", "go_casting")]]))
     await cb.answer()
 
 @router.callback_query(F.data == "m_franchise")
@@ -156,12 +170,12 @@ async def deliver_magnet(msg: Message, which: str):
     if which == "antiscam":
         await send_doc(msg, config.ANTISCAM_PDF, "чек-листа")
         await msg.answer(T.ANTISCAM_DELIVERED, reply_markup=kb([
-            [("🧭 Пройти тест", "go_test")], [("Не сейчас", "noop")]]))
+            [("🧭 Пройти тест 💰", "go_test")], [("Не сейчас 🙂", "noop")]]))
         db.schedule(uid, 86400, "antiscam_24h")
     else:
         await send_doc(msg, config.GUIDE30_PDF, "гайда")
         await msg.answer(T.GUIDE_DELIVERED, reply_markup=kb([
-            [("🎬 Подать заявку на кастинг", "go_casting")], [("Сначала дочитаю", "noop")]]))
+            [("🎬 Подать заявку на кастинг", "go_casting")], [("Сначала дочитаю 📖", "noop")]]))
         db.schedule(uid, 2*86400, "guide_48h")
     db.add_magnet(uid, which)
     db.log_event(uid, f"magnet_{which}")
@@ -181,7 +195,7 @@ async def recheck_sub(cb: CallbackQuery):
 # ---------------- Сценарий T: тест «Подходишь ли ты» ----------------
 async def run_test_intro(msg: Message, state: FSMContext):
     await state.clear()
-    await msg.answer(T.TEST_INTRO, reply_markup=kb([[("Поехали →", "t_go")]]))
+    await msg.answer(T.TEST_INTRO, reply_markup=kb([[("Поехали → 🚀", "t_go")]]))
 
 @router.callback_query(F.data == "go_test")
 async def cb_test(cb: CallbackQuery, state: FSMContext):
@@ -271,7 +285,7 @@ async def run_casting_intro(msg: Message, state: FSMContext, uid: int = None):
         await msg.answer(T.DUPLICATE_APP.format(date=dt, status=prev["status"])); return
     await state.clear()
     await msg.answer(T.CASTING_INTRO, reply_markup=kb([
-        [("Начать ✅", "c_go")], [("Сначала расскажите про условия", "c_terms")]]))
+        [("Начать ✅", "c_go")], [("Сначала про условия ℹ️", "c_terms")]]))
 
 @router.callback_query(F.data == "c_terms")
 async def c_terms(cb: CallbackQuery):
@@ -313,8 +327,8 @@ async def c_city(msg: Message, state: FSMContext):
     await state.update_data(city=msg.text.strip()[:100])
     await state.set_state(Casting.exp)
     await msg.answer(T.Q_EXP, reply_markup=kb([
-        [("Веду соцсети активно", "ce_active")], [("Аккаунт есть, но тихий", "ce_quiet")],
-        [("С полного нуля", "ce_zero")]]))
+        [("📱 Веду соцсети активно", "ce_active")], [("🤫 Аккаунт есть, но тихий", "ce_quiet")],
+        [("🌱 С полного нуля", "ce_zero")]]))
 
 @router.callback_query(Casting.exp, F.data.startswith("ce_"))
 async def c_exp(cb: CallbackQuery, state: FSMContext):
@@ -325,11 +339,11 @@ async def c_exp(cb: CallbackQuery, state: FSMContext):
         u = db.get_user(cb.from_user.id)
         await state.update_data(hours=u["test_hours"], nights=u["test_nights"])
         await state.set_state(Casting.video)
-        await cb.message.answer(T.Q_VIDEO, reply_markup=kb([[("Запишу позже", "cv_later")]]))
+        await cb.message.answer(T.Q_VIDEO, reply_markup=kb([[("⏳ Запишу позже", "cv_later")]]))
     else:
         await state.set_state(Casting.hours)
         await cb.message.answer(T.Q_HOURS, reply_markup=kb([
-            [("до 10", "ch_lt10")], [("10–20", "ch_mid")], [("20+", "ch_hi")]]))
+            [("⏱ до 10", "ch_lt10")], [("⏱ 10–20", "ch_mid")], [("🔥 20+", "ch_hi")]]))
     await cb.answer()
 
 @router.callback_query(Casting.hours, F.data.startswith("ch_"))
@@ -338,8 +352,8 @@ async def c_hours(cb: CallbackQuery, state: FSMContext):
     await state.update_data(hours=m[cb.data])
     await state.set_state(Casting.nights)
     await cb.message.answer(T.Q_NIGHTS, reply_markup=kb([
-        [("Норм, я сова 🦉", "cn_ok")], [("Надо понять, как устроено", "cn_maybe")],
-        [("Точно нет", "cn_no")]]))
+        [("🦉 Норм, я сова", "cn_ok")], [("🤔 Надо понять, как устроено", "cn_maybe")],
+        [("🌙 Точно нет", "cn_no")]]))
     await cb.answer()
 
 @router.callback_query(Casting.nights, F.data.startswith("cn_"))
@@ -347,7 +361,7 @@ async def c_nights(cb: CallbackQuery, state: FSMContext):
     m = {"cn_ok": "ok", "cn_maybe": "maybe", "cn_no": "no"}
     await state.update_data(nights=m[cb.data])
     await state.set_state(Casting.video)
-    await cb.message.answer(T.Q_VIDEO, reply_markup=kb([[("Запишу позже", "cv_later")]]))
+    await cb.message.answer(T.Q_VIDEO, reply_markup=kb([[("⏳ Запишу позже", "cv_later")]]))
     await cb.answer()
 
 @router.message(Casting.video, F.video_note | F.video)
@@ -442,8 +456,8 @@ async def f_city(msg: Message, state: FSMContext):
     await state.update_data(city=msg.text.strip()[:100])
     await state.set_state(Franchise.biz)
     await msg.answer(T.FR_EXP, reply_markup=kb([
-        [("Действующий бизнес", "fb_now")], [("Был опыт", "fb_past")],
-        [("Опыта нет, есть команда/партнёр", "fb_team")], [("Опыта нет", "fb_none")]]))
+        [("💼 Действующий бизнес", "fb_now")], [("📈 Был опыт", "fb_past")],
+        [("👥 Опыта нет, есть команда", "fb_team")], [("🌱 Опыта нет", "fb_none")]]))
 
 @router.callback_query(Franchise.biz, F.data.startswith("fb_"))
 async def f_biz(cb: CallbackQuery, state: FSMContext):
@@ -453,8 +467,8 @@ async def f_biz(cb: CallbackQuery, state: FSMContext):
     await state.set_state(Franchise.budget)
     # [ЗАГЛУШКА: вилки от реальных цен тарифов]
     await cb.message.answer(T.FR_BUDGET, reply_markup=kb([
-        [("до 300 тыс.", "fu_a")], [("300–700 тыс.", "fu_b")],
-        [("700 тыс. и выше", "fu_c")], [("Пока изучаю модель", "fu_x")]]))
+        [("💰 до 300 тыс.", "fu_a")], [("💰 300–700 тыс.", "fu_b")],
+        [("💰 700 тыс. и выше", "fu_c")], [("🔍 Пока изучаю модель", "fu_x")]]))
     await cb.answer()
 
 @router.callback_query(Franchise.budget, F.data.startswith("fu_"))
@@ -463,8 +477,8 @@ async def f_budget(cb: CallbackQuery, state: FSMContext):
     await state.update_data(budget=m[cb.data])
     await state.set_state(Franchise.timing)
     await cb.message.answer(T.FR_TIMING, reply_markup=kb([
-        [("В течение месяца", "ft_1")], [("2–3 месяца", "ft_3")],
-        [("Полгода и позже", "ft_6")], [("Просто интересуюсь", "ft_x")]]))
+        [("🚀 В течение месяца", "ft_1")], [("📅 2–3 месяца", "ft_3")],
+        [("🕐 Полгода и позже", "ft_6")], [("👀 Просто интересуюсь", "ft_x")]]))
     await cb.answer()
 
 @router.callback_query(Franchise.timing, F.data.startswith("ft_"))
@@ -473,8 +487,8 @@ async def f_timing(cb: CallbackQuery, state: FSMContext):
     await state.update_data(timing=m[cb.data])
     await state.set_state(Franchise.familiar)
     await cb.message.answer(T.FR_FAMILIAR, reply_markup=kb([
-        [("Работаю в этой нише", "ff_pro")], [("Смотрю как зритель", "ff_view")],
-        [("Узнал(а) из вашего контента", "ff_new")]]))
+        [("🎯 Работаю в этой нише", "ff_pro")], [("👀 Смотрю как зритель", "ff_view")],
+        [("📺 Узнал(а) из вашего контента", "ff_new")]]))
     await cb.answer()
 
 @router.callback_query(Franchise.familiar, F.data.startswith("ff_"))
@@ -536,6 +550,30 @@ async def fwd_help(cb: CallbackQuery, state: FSMContext):
     await state.update_data(pending_text=None)
     await cb.answer()
 
+# --- нажатия на постоянное нижнее меню (reply-кнопки) ---
+REPLY_MAP = {
+    "🧭 Подходишь ли ты?": "test",
+    "📚 Материалы": "materials",
+    "🤝 Партнёрство": "franchise",
+    "📢 Наш канал": "channel",
+}
+
+@router.message(F.text.in_(REPLY_MAP.keys()))
+async def reply_menu_press(msg: Message, state: FSMContext):
+    await state.clear()
+    action = REPLY_MAP[msg.text]
+    if action == "casting":
+        await run_casting_intro(msg, state)
+    elif action == "test":
+        await run_test_intro(msg, state)
+    elif action == "materials":
+        await show_materials(msg)
+    elif action == "franchise":
+        await run_franchise_intro(msg, state)
+    elif action == "channel":
+        await msg.answer(f"📢 Наш канал с реальными цифрами каждую неделю:\n{config.CHANNEL_URL}")
+
+
 @router.message(F.text)
 async def free_text(msg: Message, state: FSMContext):
     """Вне сценариев: режим help или предложение переслать команде."""
@@ -558,7 +596,7 @@ async def free_text(msg: Message, state: FSMContext):
         return
     await state.update_data(pending_text=msg.text[:500])
     await msg.answer(T.FREE_TEXT_FALLBACK, reply_markup=kb([
-        [("Да, отправить", "fwd_help")], [("Меню", "noop_menu")]]))
+        [("✅ Да, отправить", "fwd_help")], [("🏠 Меню", "noop_menu")]]))
 
 @router.callback_query(F.data == "noop_menu")
 async def noop_menu(cb: CallbackQuery):
@@ -585,10 +623,10 @@ async def cmd_stats(msg: Message):
 # ---------------- Отложенные сообщения ----------------
 FOLLOWUP_TEXTS = {
     "antiscam_24h": (T.ANTISCAM_FOLLOWUP_24H,
-                     [[("🎬 Узнать про кастинг", "go_casting")], [("Пока просто читаю канал", "noop")]]),
+                     [[("🎬 Узнать про кастинг", "go_casting")], [("📢 Пока просто читаю канал", "noop")]]),
     "guide_48h": (T.GUIDE_FOLLOWUP_48H,
                   [[("🎬 Расскажи про кастинг", "go_casting")],
-                   [("⏰ Напомни через неделю", "remind_week")], [("Не моё", "stop_warmup")]]),
+                   [("⏰ Напомни через неделю", "remind_week")], [("🚫 Не моё", "stop_warmup")]]),
     "guide_week": (T.GUIDE_REMIND_WEEK, [[("🎬 Кастинг", "go_casting")]]),
     "casting_video_24h": (T.VIDEO_REMIND_24H, None),
     "fr_m3_reminder": (T.M3_REMINDER, [[("📝 Заполнить анкету", "go_franchise")]]),
@@ -631,11 +669,22 @@ async def followup_loop(bot: Bot):
         await asyncio.sleep(config.FOLLOWUP_CHECK_SECONDS)
 
 # ---------------- main ----------------
+async def set_commands(bot: Bot):
+    await bot.set_my_commands([
+        BotCommand(command="start",    description="🚀 Запустить бота заново"),
+        BotCommand(command="menu",     description="🏠 Главное меню"),
+        BotCommand(command="casting",  description="🎬 Кастинг ведущих"),
+        BotCommand(command="materials",description="📚 Мои материалы"),
+        BotCommand(command="help",     description="💬 Связь с человеком"),
+    ], scope=BotCommandScopeDefault())
+
+
 async def main():
     db.init_db()
     bot = Bot(config.BOT_TOKEN)
     dp = Dispatcher()
     dp.include_router(router)
+    await set_commands(bot)
     asyncio.create_task(followup_loop(bot))
     logging.info("TeamUniverse bot started")
     await dp.start_polling(bot)
