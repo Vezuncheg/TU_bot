@@ -53,7 +53,10 @@ def kb(rows):
         for b in row:
             text, action = b[0], b[1]
             style = b[2] if len(b) > 2 else "primary"
-            r.append(InlineKeyboardButton(text=text, callback_data=action[:64], style=style))
+            if action.startswith("http"):
+                r.append(InlineKeyboardButton(text=text, url=action, style=style))
+            else:
+                r.append(InlineKeyboardButton(text=text, callback_data=action[:64], style=style))
         out.append(r)
     return InlineKeyboardMarkup(inline_keyboard=out)
 
@@ -446,12 +449,52 @@ async def sc_testIntro(bot, uid, s, **kw):
     return await send_msgs(bot, uid, C.S["testIntro"])
 
 
+# ---------------- материалы: сначала подписка на канал (решение Артёма 23.10) ----------------
+_sub_warned = False
+
+
+async def is_subscribed(bot, uid):
+    """True / False; None — проверить нельзя (бот не админ канала, канал не найден): тогда материал отдаём."""
+    try:
+        m = await bot.get_chat_member(config.SUB_CHANNEL, uid)
+    except Exception as e:
+        global _sub_warned
+        log.warning(f"проверка подписки: {e}")
+        if not _sub_warned and config.ARTEM_CHAT_ID:
+            _sub_warned = True
+            try:
+                await bot.send_message(config.ARTEM_CHAT_ID, f"⚠️ Бот не может проверить подписку на {config.SUB_CHANNEL}: {e}\n"
+                                                             "Материалы пока отдаются без проверки. Сделайте бота администратором канала.")
+            except Exception:
+                pass
+        return None
+    st = getattr(m, "status", "")
+    return st in ("member", "administrator", "creator") or (st == "restricted" and bool(getattr(m, "is_member", False)))
+
+
+async def sc_material(bot, uid, s, name, **kw):
+    ok = await is_subscribed(bot, uid)
+    if ok is False:
+        again = s.get("sub_wait") == name
+        s["sub_wait"] = name
+        ev(uid, "sub_need", name)
+        return await send_msgs(bot, uid, [dict(text=C.SUB_AGAIN if again else C.SUB_NEED,
+                                               kb=[[("📢 Подписаться на канал", config.CHANNEL_URL)],
+                                                   [("✅ Подписка есть — прислать", f"g:{name}")]])])
+    if s.pop("sub_wait", None) == name and ok:
+        ev(uid, "subscribed", name)
+    ev(uid, "material", name)
+    return await send_msgs(bot, uid, C.S[name])
+
+
 SPECIAL = {"under18": sc_under18, "red": sc_red, "t3": sc_t3, "offer": sc_offer, "aIntro": sc_aIntro, "vCard": sc_vCard,
            "aDone": sc_aDone, "p1": sc_p1, "p3": sc_p3, "calc": sc_calc, "phone": sc_phone, "chatWay": sc_chatWay,
            "day": sc_day, "time": sc_time, "confirm": sc_confirm, "done": sc_done, "notActual": sc_notActual,
            "testIntro": sc_testIntro,
            "bQ1": lambda b, u, s, **k: sc_bQ(b, u, s, 0), "bQ2": lambda b, u, s, **k: sc_bQ(b, u, s, 1),
-           "bQ3": lambda b, u, s, **k: sc_bQ(b, u, s, 2)}
+           "bQ3": lambda b, u, s, **k: sc_bQ(b, u, s, 2),
+           "guide": lambda b, u, s, **k: sc_material(b, u, s, "guide"),
+           "check": lambda b, u, s, **k: sc_material(b, u, s, "check")}
 
 
 # ---------------- тест ----------------
@@ -588,8 +631,8 @@ async def to_team(bot, uid, text):
 # обработчики
 # =====================================================================
 # старые метки (бот до v2): test, casting, antiscam, guide30, franchise — ведут туда же по смыслу.
-# franchise в старом боте — анкета запуска своего центра (другой продукт), поэтому не в «Партнёр TeamUniverse», а в меню
-ROUTES_EXACT = {"test": "testIntro", "casting": "aIntro", "team": "aIntro", "franchise": "menu", "partner": "p1",
+# franchise → «Партнёр TeamUniverse» (решение Артёма 23.10)
+ROUTES_EXACT = {"test": "testIntro", "casting": "aIntro", "team": "aIntro", "franchise": "p1", "partner": "p1",
                 "paket": "p1", "guide30": "guide", "guide": "guide", "antiscam": "check", "check": "check",
                 "menu": "menu", "about": "about", "calc": "calc"}
 

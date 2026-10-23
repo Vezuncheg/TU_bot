@@ -23,8 +23,9 @@ from aiogram import Bot                                              # noqa: E40
 from aiogram.client.default import DefaultBotProperties             # noqa: E402
 from aiogram.client.session.base import BaseSession                 # noqa: E402
 from aiogram.methods import TelegramMethod                          # noqa: E402
-from aiogram.types import (CallbackQuery, Chat, Contact, Document, Message, MessageId, PhotoSize, Update,  # noqa: E402
-                           User, Video, VideoNote)
+from aiogram.types import (CallbackQuery, Chat, ChatMemberLeft, ChatMemberMember, Contact, Document, Message,  # noqa: E402
+                           MessageId, PhotoSize, Update, User, Video, VideoNote)
+from aiogram.exceptions import TelegramBadRequest                   # noqa: E402
 
 import bot as B                                                      # noqa: E402
 import content as C                                                  # noqa: E402
@@ -32,6 +33,7 @@ import db                                                            # noqa: E40
 import migrate                                                       # noqa: E402
 
 SENT = []          # (chat_id, method, params)
+SUBS = {}          # uid → "left" / "error"; остальные считаются подписанными
 PROBLEMS = []
 _mid = [1000]
 
@@ -41,6 +43,11 @@ class FakeSession(BaseSession):
         name = type(method).__name__
         params = method.model_dump(exclude_none=True)
         SENT.append((params.get("chat_id"), name, params, method))
+        if name == "GetChatMember":
+            uid = int(params["user_id"]); st = SUBS.get(uid, "member"); u = User(id=uid, is_bot=False, first_name="x")
+            if st == "error":
+                raise TelegramBadRequest(method=method, message="Bad Request: member list is inaccessible")
+            return ChatMemberLeft(user=u) if st == "left" else ChatMemberMember(user=u)
         _mid[0] += 1
         chat = Chat(id=int(params.get("chat_id") or 0), type="private")
         base = dict(message_id=_mid[0], date=datetime.now(), chat=chat)
@@ -351,10 +358,10 @@ async def flow_red_and_links():
     expect(shown(uid, "aIntro"), "старая ссылка ?start=casting → анкета команды")
     # старые метки из постов и сайта (бот до v2) — туда же по смыслу; регистр не важен, как в старом боте
     want = {"test": "testIntro", "TEST": "testIntro", "test_post12": "testIntro", "test_post15": "testIntro", "casting": "aIntro",
-            "antiscam": "check", "guide30": "guide", "franchise": "menu"}
+            "antiscam": "check", "guide30": "guide", "franchise": "p1"}
     got = {k: B.route_for(re.sub(r"[^\w\-]", "", k.strip().lower())) for k in want}
     expect(got == want, f"старые метки ведут туда же: {got}")
-    for i, (lbl, scr) in enumerate((("TEST", "testIntro"), ("franchise", "menu"), ("test_post15", "testIntro"))):
+    for i, (lbl, scr) in enumerate((("TEST", "testIntro"), ("franchise", "p1"), ("test_post15", "testIntro"))):
         await feed(600 + i, text=f"/start {lbl}")
         expect(shown(600 + i, scr), f"?start={lbl} → {scr}")
     await feed(uid, text="/start reel_tiktok_1")
@@ -372,6 +379,31 @@ async def flow_materials():
     await press(uid, "Полезные материалы")
     out = await press(uid, "Гайд")
     expect(any(n == "SendDocument" for _, n, p, m in out), "гайд уходит файлом")
+    # материалы — после подписки на канал (решение Артёма 23.10)
+    uid2 = 506
+    SUBS[uid2] = "left"
+    out = await feed(uid2, text="/start antiscam")
+    t = " ".join(p.get("text") or "" for _, n, p, m in out)
+    btns = [b for row in (out[-1][2].get("reply_markup") or {}).get("inline_keyboard", []) for b in row]
+    expect(not any(n == "SendDocument" for _, n, p, m in out) and C.SUB_NEED in t, "?start=antiscam без подписки → просьба подписаться, файла нет")
+    expect(any(b.get("url") == B.config.CHANNEL_URL for b in btns), "кнопка «Подписаться» открывает канал")
+    out = await feed(uid2, data="g:check")
+    t = " ".join(p.get("text") or "" for _, n, p, m in out)
+    expect(not any(n == "SendDocument" for _, n, p, m in out) and C.SUB_AGAIN in t, "нажала, не подписавшись → «пока не вижу подписки»")
+    SUBS[uid2] = "member"
+    out = await feed(uid2, data="g:check")
+    expect(any(n == "SendDocument" for _, n, p, m in out), "подписалась → чек-лист уходит файлом")
+    SUBS[507] = "left"
+    out = await feed(507, text="/start guide30")
+    expect(not any(n == "SendDocument" for _, n, p, m in out), "?start=guide30 без подписки → файла нет")
+    SUBS[507] = "member"
+    out = await feed(507, data="g:guide")
+    expect(any(n == "SendDocument" for _, n, p, m in out), "подписалась → гайд уходит файлом")
+    SUBS[508] = "error"
+    out = await feed(508, text="/start guide30")
+    expect(any(n == "SendDocument" for _, n, p, m in out), "проверить подписку нельзя (бот не админ) → материал всё равно отдаём")
+    expect(any(c == B.config.ARTEM_CHAT_ID and "проверить подписку" in (p.get("text") or "") for c, n, p, m in SENT) or not B.config.ARTEM_CHAT_ID,
+           "Артёму — предупреждение, что подписку проверить нельзя")
     await feed(uid, text="ℹ️ О студии")
     expect(shown(uid, "about"), "нижнее меню → О студии")
     await press(uid, "Ещё пример баттла")
@@ -417,6 +449,21 @@ def media_check():
     expect(not dup, "каждая картинка и видео — один раз" + (f" — повторы: {dup}" if dup else ""))
 
 
+async def cache_check():
+    """Кэш file_id привязан к содержимому файла: заменили картинку (К-01, 23.10) — бот грузит новую, а не старую."""
+    import media as M
+    from aiogram.types import FSInputFile
+    def last_photo():
+        return [p["photo"] for _, n, p, m in SENT if n == "SendPhoto"][-1]
+    await M.send(bot, 901, "card:t1"); await settle()
+    await M.send(bot, 901, "card:t1")
+    expect(isinstance(last_photo(), str), "повторная отправка картинки — по file_id, без загрузки")
+    M._fp["card:t1"] = "другой"            # как будто файл заменили
+    await M.send(bot, 901, "card:t1")
+    expect(not isinstance(last_photo(), str), "файл заменили → загружается заново, старый file_id не используется")
+    M._fp.pop("card:t1")
+
+
 async def main():
     if os.path.exists(DB_FILE):
         os.remove(DB_FILE)
@@ -433,6 +480,7 @@ async def main():
     await flow_red_and_links()
     await flow_materials()
     media_check()
+    await cache_check()
     vids = [p.get("caption") or "" for ch, n, p, m in SENT if n == "SendVideo"]
     expect(any("опыт эфиров" in c.lower() and "Вопрос" in c for c in vids), "вопрос анкеты про опыт эфиров — видео баттла (В-08)")
     expect(any("3 вопроса перед консультацией" in c for c in vids), "перед консультацией — видео баттла (В-09), вопрос в подписи")

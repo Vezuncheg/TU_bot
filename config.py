@@ -27,6 +27,9 @@ if ARTEM_CHAT_ID > 0:
     ADMIN_IDS.add(ARTEM_CHAT_ID)
 
 CHANNEL_URL = "https://t.me/teamuniverse_live"      # новый канал (решение 19.10); старая переменная CHANNEL_URL не используется
+# Канал для проверки подписки перед материалами (бот должен быть его администратором).
+# Старая переменная CHANNEL_ID указывала на прежний канал — не используется.
+SUB_CHANNEL = os.getenv("SUB_CHANNEL_ID", "@teamuniverse_live")
 
 # Аватарка бота: ставится один раз при первом запуске новой версии (флаг в таблице kv)
 SET_AVATAR = os.getenv("SET_AVATAR", "1") == "1"

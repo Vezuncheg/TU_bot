@@ -1,5 +1,6 @@
 """Отправка картинок и видео: каждый файл грузится в Telegram один раз, дальше — по file_id из базы."""
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -12,7 +13,8 @@ import db
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MEDIA = os.path.join(HERE, "media")
-_cache = {}          # key → file_id
+_cache = {}          # key@отпечаток файла → file_id (заменили файл — отпечаток другой, грузим заново)
+_fp = {}             # key → отпечаток содержимого
 _manifest = {}       # key → {w, h, dur} для видео
 
 
@@ -56,16 +58,32 @@ def all_keys():
     return out
 
 
+def _ck(key):
+    """Ключ кэша: имя + отпечаток содержимого файла."""
+    if key not in _fp:
+        try:
+            with open(path_of(key), "rb") as f:
+                _fp[key] = hashlib.sha1(f.read()).hexdigest()[:10]
+        except OSError:
+            _fp[key] = ""
+    return f"{key}@{_fp[key]}"
+
+
+def _get(key):
+    return _cache.get(_ck(key))
+
+
 def _remember(key, file_id):
-    _cache[key] = file_id
-    asyncio.get_running_loop().run_in_executor(None, db.media_set, key, file_id)
+    ck = _ck(key)
+    _cache[ck] = file_id
+    asyncio.get_running_loop().run_in_executor(None, db.media_set, ck, file_id)
 
 
 async def send(bot: Bot, chat_id, key, caption=None, reply_markup=None):
     """Отправить медиа по ключу. Возвращает Message."""
     key = resolve(key)
     kind = key.split(":", 1)[0]
-    fid = _cache.get(key)
+    fid = _get(key)
     for attempt in (0, 1):
         src = fid if (fid and attempt == 0) else FSInputFile(path_of(key))
         try:
@@ -96,14 +114,14 @@ async def send(bot: Bot, chat_id, key, caption=None, reply_markup=None):
 def input_media(key):
     """Для правки сообщения (калькулятор): InputMediaPhoto по file_id или файлу."""
     from aiogram.types import InputMediaPhoto
-    fid = _cache.get(key)
+    fid = _get(key)
     return InputMediaPhoto(media=fid or FSInputFile(path_of(key)))
 
 
 def remember_from(key, message):
     if message and getattr(message, "photo", None):
         fid = message.photo[-1].file_id
-        if fid != _cache.get(key):
+        if fid != _get(key):
             _remember(key, fid)
 
 
@@ -111,7 +129,7 @@ async def warmup(bot: Bot, chat_id):
     """Один раз загрузить все медиа в служебный чат и запомнить file_id."""
     n = 0
     for key in all_keys():
-        if key in _cache:
+        if _get(key):
             continue
         try:
             m = await send(bot, chat_id, key)
