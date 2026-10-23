@@ -39,6 +39,14 @@ def path_of(key):
     raise ValueError(key)
 
 
+def resolve(key):
+    """card:имя → video:имя, если на этом экране картинку заменили видео (23.10: баттлы ведущих вместо стока)."""
+    kind, name = key.split(":", 1)
+    if kind == "card" and not os.path.exists(path_of(key)) and os.path.exists(path_of("video:" + name)):
+        return "video:" + name
+    return key
+
+
 def all_keys():
     out = []
     for sub, kind, ext in (("cards", "card", ".jpg"), ("video", "video", ".mp4")):
@@ -55,6 +63,7 @@ def _remember(key, file_id):
 
 async def send(bot: Bot, chat_id, key, caption=None, reply_markup=None):
     """Отправить медиа по ключу. Возвращает Message."""
+    key = resolve(key)
     kind = key.split(":", 1)[0]
     fid = _cache.get(key)
     for attempt in (0, 1):

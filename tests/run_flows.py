@@ -4,6 +4,7 @@
 запись на разговор и напоминания, стоп для младше 18, метки ?start=, пересылку заявки и ответа представителя."""
 import asyncio
 import json
+import re
 import os
 import sys
 import tempfile
@@ -348,6 +349,14 @@ async def flow_red_and_links():
     expect("Что мешает: до 2 часов" in t, "причины перечислены")
     await feed(uid, text="/start casting")
     expect(shown(uid, "aIntro"), "старая ссылка ?start=casting → анкета команды")
+    # старые метки из постов и сайта (бот до v2) — туда же по смыслу; регистр не важен, как в старом боте
+    want = {"test": "testIntro", "TEST": "testIntro", "test_post12": "testIntro", "test_post15": "testIntro", "casting": "aIntro",
+            "antiscam": "check", "guide30": "guide", "franchise": "menu"}
+    got = {k: B.route_for(re.sub(r"[^\w\-]", "", k.strip().lower())) for k in want}
+    expect(got == want, f"старые метки ведут туда же: {got}")
+    for i, (lbl, scr) in enumerate((("TEST", "testIntro"), ("franchise", "menu"), ("test_post15", "testIntro"))):
+        await feed(600 + i, text=f"/start {lbl}")
+        expect(shown(600 + i, scr), f"?start={lbl} → {scr}")
     await feed(uid, text="/start reel_tiktok_1")
     expect(db.get_user(uid)["source"] == "test_post12" and db.get_user(uid)["last_source"] == "reel_tiktok_1",
            "первая метка не перезаписывается, последняя — отдельно")
@@ -383,6 +392,7 @@ def media_check():
         keys.add(x["media"])
     keys |= {f"card:calc_{h}" for h in C.CALC_HOURS} | {f"card:aq_{q[0]}" for q in C.TEAM_Q} | {f"card:bQ{i}" for i in (1, 2, 3)}
     keys.add("video:avatar")
+    keys = {M.resolve(k) for k in keys}         # экраны, где картинку заменили видео
     missing, big = [], []
     for k in sorted(keys):
         p = M.path_of(k)
@@ -423,6 +433,9 @@ async def main():
     await flow_red_and_links()
     await flow_materials()
     media_check()
+    vids = [p.get("caption") or "" for ch, n, p, m in SENT if n == "SendVideo"]
+    expect(any("опыт эфиров" in c.lower() and "Вопрос" in c for c in vids), "вопрос анкеты про опыт эфиров — видео баттла (В-08)")
+    expect(any("3 вопроса перед консультацией" in c for c in vids), "перед консультацией — видео баттла (В-09), вопрос в подписи")
     errs = []
     with db._Ctx() as c:
         c.execute("SELECT details FROM events WHERE event='error'")

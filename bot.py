@@ -322,7 +322,7 @@ async def sc_bQ(bot, uid, s, n):
         rows = [[(labels[j], f"bq:1:{j}")] for j in range(3)]
     else:
         rows = [[(labels[0], "bq:2:0"), (labels[1], "bq:2:1")], [(labels[2], "bq:2:2")]]
-    texts = {0: "Чтобы на консультации не тратить время на анкету.", 1: "", 2: ""}
+    texts = {0: "<i>3 вопроса перед консультацией</i>\n<b>Опыт эфиров?</b>\nЧтобы на консультации не тратить время на анкету.", 1: "", 2: ""}  # bQ1 — видео (В-09), вопрос в подписи
     return await media.send(bot, uid, f"card:bQ{n + 1}", caption=texts[n] or None, reply_markup=kb(rows))
 
 
@@ -587,7 +587,9 @@ async def to_team(bot, uid, text):
 # =====================================================================
 # обработчики
 # =====================================================================
-ROUTES_EXACT = {"test": "testIntro", "casting": "aIntro", "team": "aIntro", "franchise": "p1", "partner": "p1",
+# старые метки (бот до v2): test, casting, antiscam, guide30, franchise — ведут туда же по смыслу.
+# franchise в старом боте — анкета запуска своего центра (другой продукт), поэтому не в «Партнёр TeamUniverse», а в меню
+ROUTES_EXACT = {"test": "testIntro", "casting": "aIntro", "team": "aIntro", "franchise": "menu", "partner": "p1",
                 "paket": "p1", "guide30": "guide", "guide": "guide", "antiscam": "check", "check": "check",
                 "menu": "menu", "about": "about", "calc": "calc"}
 
