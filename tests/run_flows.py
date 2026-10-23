@@ -72,6 +72,19 @@ _upd = [1]
 TIMES = []
 
 
+async def settle(limit=10.0):
+    """Ждём, пока закончатся фоновые задачи бота (запись в базу, карточка заявки) — при любой задержке базы."""
+    me = asyncio.current_task()
+    end = time.perf_counter() + limit
+    await asyncio.sleep(0)
+    while time.perf_counter() < end:
+        rest = [t for t in asyncio.all_tasks() if t is not me and not t.done()]
+        if not rest:
+            return
+        await asyncio.wait(rest, timeout=end - time.perf_counter())
+    PROBLEMS.append(f"фоновые задачи не закончились за {limit:.0f} с")
+
+
 def user(uid, name="Катя", uname="katya"):
     return User(id=uid, is_bot=False, first_name=name, username=uname)
 
@@ -95,8 +108,9 @@ async def feed(uid, *, text=None, data=None, video_note=False, video=False, cont
         upd = Update(update_id=_upd[0], message=Message(**base, text=text, reply_to_message=rt))
     t = time.perf_counter()
     await dp.feed_update(bot, upd)
-    await asyncio.sleep(0.05)       # фоновые записи в базу
-    TIMES.append((data or text or "media", (time.perf_counter() - t) * 1000, len([x for x in SENT[n0:] if x[1].startswith(("Send", "Edit"))])))
+    ms = (time.perf_counter() - t) * 1000   # время ответа человеку, без фоновых записей
+    await settle()                  # дождаться фоновых записей в базу и карточек
+    TIMES.append((data or text or "media", ms, len([x for x in SENT[n0:] if x[1].startswith(("Send", "Edit"))])))
     out = SENT[n0:]
     check(out)
     return out
@@ -165,7 +179,7 @@ async def run_due(force=True):
             c.execute(db._q("UPDATE scheduled SET due_ts=%s WHERE status='pending' AND kind=%s"), (int(time.time()) - 1, "p1"))
     for r in await asyncio.to_thread(db.claim_due):
         await B.run_scheduled(bot, r)
-    await asyncio.sleep(0.05)
+    await settle()
 
 
 async def survey(uid, s3="до 50 тыс. ₽", s4="4–6", age="21–24", src=None):
@@ -223,7 +237,7 @@ async def flow_team():
     await press(uid, "Звонок")
     out = await feed(uid, contact="+79161234567")
     expect(shown(uid, "day"), "после номера — выбор дня")
-    out = await feed(uid, data=last_kb(uid)[0]["callback_data"])     # первый день
+    out = await feed(uid, data="day:1")     # завтра: до окна больше двух часов при любом времени запуска
     out = await feed(uid, data=last_kb(uid)[0]["callback_data"])     # первое время
     expect(shown(uid, "confirm") or any("Записал" in (p.get("text") or "") for _, n, p, m in out), "подтверждение времени")
     out = await press(uid, "Да, буду")
@@ -288,7 +302,7 @@ async def flow_partner():
     await press(uid, "в этом месяце")
     await press(uid, "есть")
     await press(uid, "Переписка")
-    await feed(uid, data=last_kb(uid)[0]["callback_data"])
+    await feed(uid, data="day:1")    # завтра — чтобы напоминание «за 2 часа» ставилось при любом времени запуска
     await feed(uid, data=last_kb(uid)[0]["callback_data"])
     out = await press(uid, "Да, буду")
     expect(any("частые вопросы" in (p.get("text") or "") for _, n, p, m in out), "запись: «пока ждёшь — частые вопросы»")

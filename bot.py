@@ -274,12 +274,13 @@ async def p1_step(bot, uid, s, i):
     s["p1step"] = i
     s["screen"] = "p1"
     ev(uid, "partner_step", str(i + 1))
-    bg(db.cancel, uid, ["p1"])
     x = C.P1[i]
     rows = x.get("kb") or [[("Далее →", f"p1:{i + 1}")]]
     m = await send_msgs(bot, uid, [x], last_kb=rows)
     if i < len(C.P1) - 1:
-        bg(db.schedule, uid, "p1", time.time() + config.PARTNER_NEXT_SEC, {"step": i + 1})
+        bg(db.reschedule, uid, "p1", time.time() + config.PARTNER_NEXT_SEC, {"step": i + 1})
+    else:
+        bg(db.cancel, uid, ["p1"])
     return m
 
 
@@ -736,8 +737,7 @@ async def handle_action(bot, uid, s, a, arg, cb=None):
         s.update(types={"E": 0, "S": 0, "T": 0, "D": 0}, flags=[], cond={}, test_done=False)
         s["cond_lbl"] = {k: v for k, v in s["cond_lbl"].items() if k == "hours"}
         ev(uid, "test_started")
-        bg(db.cancel, uid, ["dzTest"])
-        bg(db.schedule, uid, "dzTest", time.time() + 86400)
+        bg(db.reschedule, uid, "dzTest", time.time() + 86400)
         return await ask_test(bot, uid, s, 0)
     if a == "tq":
         i, j = map(int, arg.split(":"))

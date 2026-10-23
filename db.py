@@ -170,6 +170,15 @@ def schedule(uid, kind, due_ts, payload=None):
                   (uid, kind, json.dumps(payload or {}, ensure_ascii=False), int(due_ts), now()))
 
 
+def reschedule(uid, kind, due_ts, payload=None):
+    """Заменить ожидающее сообщение вида kind новым — отмена и запись одной операцией, по порядку
+    (раньше шли двумя фоновыми задачами, и отмена иногда стирала только что записанный таймер)."""
+    with _Ctx() as c:
+        c.execute(_q("UPDATE scheduled SET status='cancelled' WHERE user_id=%s AND status='pending' AND kind=%s"), (uid, kind))
+        c.execute(_q("INSERT INTO scheduled(user_id,kind,payload,due_ts,status,created_ts) VALUES(%s,%s,%s,%s,'pending',%s)"),
+                  (uid, kind, json.dumps(payload or {}, ensure_ascii=False), int(due_ts), now()))
+
+
 def cancel(uid, kinds=None, prefix=None):
     """Отменить ожидающие сообщения человека: все, по списку видов или по началу названия."""
     sql = "UPDATE scheduled SET status='cancelled' WHERE user_id=%s AND status='pending'"
