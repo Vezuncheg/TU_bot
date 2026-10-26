@@ -78,6 +78,7 @@ bot = Bot("123:TEST", session=FakeSession(), default=DefaultBotProperties(parse_
 dp = B.build_dp()
 _upd = [1]
 TIMES = []
+MSGS = []          # всё, что ушло людям, — для проверки «помещается на экран»
 
 
 async def settle(limit=10.0):
@@ -118,9 +119,15 @@ async def feed(uid, *, text=None, data=None, video_note=False, video=False, cont
     await dp.feed_update(bot, upd)
     ms = (time.perf_counter() - t) * 1000   # время ответа человеку, без фоновых записей
     await settle()                  # дождаться фоновых записей в базу и карточек
-    TIMES.append((data or text or "media", ms, len([x for x in SENT[n0:] if x[1].startswith(("Send", "Edit"))])))
     out = SENT[n0:]
     check(out)
+    to_user = [x for x in out if x[0] == uid and x[1].startswith("Send")]
+    TIMES.append((data or text or "media", ms, len(to_user)))
+    allowed = 2 if contact else 1          # номер телефона: «Номер записал» (вернуть нижнее меню) + выбор дня — обе короткие
+    if len(to_user) > allowed:
+        PROBLEMS.append(f"[{uid}] на одно действие ({data or text or 'медиа'}) ушло {len(to_user)} сообщений подряд: "
+                        + " | ".join(((x[2].get('text') or x[2].get('caption') or x[1])[:40]).replace("\n", " ") for x in to_user))
+    MSGS.extend(to_user)
     return out
 
 
@@ -138,6 +145,12 @@ def check(out):
             PROBLEMS.append(f"подпись длиннее 1024: {p['caption'][:60]}")
         if len(p.get("text") or "") > 4096:
             PROBLEMS.append("текст длиннее 4096")
+        rm = p.get("reply_markup") or {}
+        for row in rm.get("inline_keyboard", []) + rm.get("keyboard", []):
+            lim = B.BTN_FIT.get(len(row), 7) + (3 if rm.get("keyboard") else 0)     # нижнее меню — во всю ширину экрана
+            for b in row:
+                if len(row) > 1 and len(b["text"]) > lim:
+                    PROBLEMS.append(f"кнопка не помещается в ряд из {len(row)}: «{b['text']}»")
         for b in buttons(p):
             if len((b.get("callback_data") or "").encode()) > 64:
                 PROBLEMS.append(f"callback_data > 64 байт: {b['callback_data']}")
@@ -149,8 +162,8 @@ def check(out):
                 PROBLEMS.append(f"должна быть зелёной: {b['text']}")
             if not green and st != "primary":
                 PROBLEMS.append(f"должна быть синей: {b['text']} ({st})")
-        if name in ("SendPhoto", "SendVideo") and isinstance(m.model_dump().get("photo") or m.model_dump().get("video"), str) is False:
-            pass
+        if name in ("SendPhoto", "SendVideo") and p.get("caption") and not p.get("show_caption_above_media"):
+            PROBLEMS.append(f"подпись не над картинкой: {p['caption'][:50]}")
 
 
 def last_kb(uid):
@@ -205,21 +218,24 @@ async def flow_team():
     uid = 501
     await survey(uid)
     await press(uid, "Дальше")              # t1 → t2
-    out = await press(uid, "Дальше")        # t2 → t3 + offer
-    expect(shown(uid, "t3") and shown(uid, "offer"), "знакомство 3 из 3 и предложение после опроса")
-    expect(any((p.get("reply_markup") or {}).get("keyboard") for _, n, p, m in out), "нижнее меню появилось после знакомства")
-    await press(uid, "Пройти тест")
+    await press(uid, "Дальше")              # t2 → t3
+    await press(uid, "Дальше")              # t3 → доход
+    out = await press(uid, "Дальше")        # доход → предложение
+    expect(shown(uid, "t3") and shown(uid, "t3b") and shown(uid, "offer"), "знакомство 3 из 3, доход и предложение — по «Дальше»")
+    expect(any((p.get("reply_markup") or {}).get("keyboard") for _, n, p, m in out), "нижнее меню появилось с предложением")
+    await feed(uid, text="🧭 Тест")
     await press(uid, "Поехали")
     for _ in range(7):
         await press(uid, "Долгий разговор") if any("Долгий разговор" in b["text"] for b in last_kb(uid)) else await feed(uid, data=last_kb(uid)[1]["callback_data"])
     await press(uid, "Норм, я сова")
     out = await press(uid, "Да, понимаю")
     texts = " ".join((p.get("text") or "") for _, n, p, m in out)
-    expect("СОБЕСЕДНИЦА" in texts and "условия совпадают" in texts, "результат теста: собеседница, ✅")
-    expect(shown(uid, "fork"), "развилка после теста")
+    expect("СОБЕСЕДНИЦА" in texts and "условия совпадают" in texts, "результат теста: собеседница, ✅ — одним сообщением")
+    await press(uid, "Дальше")
+    expect(shown(uid, "fork"), "развилка после теста — по «Дальше»")
     await press(uid, "В команде · 50 на 50")
     s = B._sessions[uid]
-    expect("Анкета — 9 коротких" in " ".join((p.get("text") or "") for _, n, p, m in SENT[-3:]), "анкета: 9 вопросов (часы и ночь уже известны)")
+    expect("Анкета — 9 коротких" in " ".join((p.get("text") or p.get("caption") or "") for _, n, p, m in SENT[-3:]), "анкета: 9 вопросов (часы и ночь уже известны)")
     await press(uid, "Начать анкету")
     await press(uid, "21–24")
     await press(uid, "Другой город")
@@ -235,13 +251,16 @@ async def flow_team():
     out = await feed(uid, text="а можно без видео?")
     expect("Жду кружок" in (out[0][2].get("text") or ""), "без видео дальше не пускает, подсказывает")
     out = await feed(uid, video_note=True)
-    expect(shown(uid, "vExample") and shown(uid, "vBattle"), "пример баттла и видео 2 из 2")
+    expect(shown(uid, "vBattle") and not shown(uid, "vExample"), "видео 2 из 2 — одно сообщение, пример не уходит сам")
     expect(any(n == "SendVideo" for _, n, p, m in out), "видео баттлов уходят как видео (со звуком)")
+    await press(uid, "Посмотреть пример баттла")
+    expect(shown(uid, "vExample") and B._sessions[uid]["expect"] == "video_battle", "пример баттла — по кнопке, бот по-прежнему ждёт видео")
     out = await feed(uid, video=True)
     lead_msgs = [p for ch, n, p, m in out if ch == -1001]
     expect(any("Анкета и видео" in (p.get("text") or "") for p in lead_msgs), "карточка анкеты ушла представителю")
     expect(sum(1 for ch, n, p, m in out if ch == -1001 and n in ("SendVideoNote", "SendVideo")) == 2, "оба видео переслали представителю")
     expect("Тверь (решаем индивидуально)" in " ".join(p.get("text") or "" for p in lead_msgs), "свой город в карточке")
+    expect(shown(uid, "aDone") and any("Звонок" in b["text"] for b in last_kb(uid)), "«Последний шаг» и способ связи — одним сообщением")
     await press(uid, "Звонок")
     out = await feed(uid, contact="+79161234567")
     expect(shown(uid, "day"), "после номера — выбор дня")
@@ -276,11 +295,12 @@ async def flow_partner():
     print("\nВетка «Партнёр TeamUniverse» (реклама партнёрства → преимущества → калькулятор → переписка → запись):")
     uid = 502
     await survey(uid, s3="100–300 тыс. ₽", src="partner_ads1")
-    await press(uid, "Дальше")
+    for _ in range(3):
+        await press(uid, "Дальше")
     out = await press(uid, "Дальше")
     expect(shown(uid, "offer") and any("Ты целишься в 100–300" in (p.get("caption") or "") for _, n, p, m in out), "предложение партнёрства по ответам")
     expect(db.get_user(uid)["source"] == "partner_ads1", "метка источника сохранена")
-    await press(uid, "Что даёт партнёрство")
+    await feed(uid, text="🚀 Партнёрство")
     expect(shown(uid, "p1"), "партнёрство: первое преимущество (видео)")
     await press(uid, "Далее")
     expect(B._sessions[uid]["p1step"] == 1, "«Далее» → второе преимущество")
@@ -313,7 +333,7 @@ async def flow_partner():
     await feed(uid, data="day:1")    # завтра — чтобы напоминание «за 2 часа» ставилось при любом времени запуска
     await feed(uid, data=last_kb(uid)[0]["callback_data"])
     out = await press(uid, "Да, буду")
-    expect(any("частые вопросы" in (p.get("text") or "") for _, n, p, m in out), "запись: «пока ждёшь — частые вопросы»")
+    expect(any("частые вопросы" in (p.get("text") or p.get("caption") or "") for _, n, p, m in out), "запись: «пока ждёшь — частые вопросы» в том же сообщении")
     pend = {r["kind"] for r in db.pending(uid)}
     expect(not ({"dz1", "dz3", "dz6"} & pend), "после записи дожим отменён")
     lead = db.lead_get_open(uid)
@@ -350,8 +370,9 @@ async def flow_red_and_links():
         await feed(uid, data=last_kb(uid)[0]["callback_data"])
     await press(uid, "до 2")
     await press(uid, "Точно нет")
-    out = await press(uid, "Нет, нужен результат")
-    expect(shown(uid, "red") and not shown(uid, "fork"), "🔴: честное «сейчас не твоё», без развилки")
+    await press(uid, "Нет, нужен результат")
+    out = await press(uid, "Дальше")
+    expect(shown(uid, "red") and not shown(uid, "fork"), "🔴: типаж, по «Дальше» — честное «сейчас не твоё», без развилки")
     t = " ".join(p.get("text") or "" for _, n, p, m in out)
     expect("Что мешает: до 2 часов" in t, "причины перечислены")
     await feed(uid, text="/start casting")
@@ -449,6 +470,78 @@ def media_check():
     expect(not dup, "каждая картинка и видео — один раз" + (f" — повторы: {dup}" if dup else ""))
 
 
+# ---------------- «каждое сообщение целиком на экране телефона» (правило 26.10) ----------------
+# Оценка по Telegram на iPhone/Android шириной 375–393 pt: пузырь с медиа ≈ 300 pt, текст 16–17 pt ≈ 34 знака в строке,
+# строка ≈ 21 pt, ряд кнопок ≈ 46 pt, поля пузыря ≈ 16 pt. Высота медиа — по пропорциям файла.
+SCREEN = {"обычный телефон (390×844), нижнее меню открыто": 560, "iPhone SE (375×667), меню скрыто": 540,
+          "iPhone SE (375×667), нижнее меню открыто": 430}
+LIMIT = 560          # обычный телефон с открытым нижним меню — выше считаем ошибкой
+
+
+def msg_height(name, p, m=None):
+    import media as M
+    h = 16
+    txt = p.get("text") or p.get("caption") or ""
+    plain = re.sub(r"<[^>]+>", "", txt)
+    per_line = 34 if name in ("SendPhoto", "SendVideo", "SendDocument") else 37     # подпись уже: по ширине картинки
+    for para in plain.split("\n"):
+        h += 21 * max(1, -(-len(para) // per_line)) if para else 10
+    if not txt:
+        h -= 16
+    if name in ("SendPhoto", "SendVideo"):
+        ratio = 1.0
+        key = media_key(m)
+        if key and key.startswith("card:"):
+            try:
+                from PIL import Image
+                w, hh = Image.open(M.path_of(key)).size
+                ratio = hh / w
+            except Exception:
+                ratio = 1.0
+        elif key:
+            meta = M._manifest.get(key, {})
+            ratio = (meta.get("h") or 1) / (meta.get("w") or 1)
+        h += round(300 * min(ratio, 1.43))
+    if name == "SendDocument":
+        h += 70
+    rm = p.get("reply_markup") or {}
+    h += 46 * len(rm.get("inline_keyboard", []))
+    return h
+
+
+def media_key(method):
+    """Какой файл бота ушёл в сообщении: по пути файла или по file_id из кэша."""
+    import media as M
+    src = getattr(method, "photo", None) or getattr(method, "video", None)
+    path = getattr(src, "path", None)
+    if path:
+        name = os.path.splitext(os.path.basename(str(path)))[0]
+        return ("card:" if str(path).endswith(".jpg") else "video:") + name
+    for ck, fid in M._cache.items():
+        if fid == src:
+            return ck.split("@")[0]
+    return None
+
+
+def screen_check():
+    print("\nПомещается ли каждое сообщение на экран телефона (оценка):")
+    worst = sorted(((msg_height(n, p, m), n, (p.get("caption") or p.get("text") or n)[:50].replace("\n", " ")) for _, n, p, m in MSGS),
+                   reverse=True)
+    seen, top = set(), []
+    for hgt, n, t in worst:
+        if t in seen:
+            continue
+        seen.add(t)
+        top.append((hgt, n, t))
+    for hgt, n, t in top[:8]:
+        print(f"  {hgt:>4} pt · {t}")
+    over = [x for x in top if x[0] > LIMIT]
+    # оценка приблизительная — не провал прогона, а список экранов, которые проверить на телефоне в первую очередь
+    print(("  ✅ " if not over else "  ⚠️ ") + f"все сообщения ≤ {LIMIT} pt (обычный телефон с открытым нижним меню)" + (f" — выше: {[(h, t) for h, n, t in over]}" if over else ""))
+    se = [x for x in top if x[0] > SCREEN["iPhone SE (375×667), нижнее меню открыто"]]
+    print(f"  на iPhone SE с открытым нижним меню (≈430 pt) не целиком помещаются: {len(se)} — " + "; ".join(t for h, n, t in se[:12]))
+
+
 async def cache_check():
     """Кэш file_id привязан к содержимому файла: заменили картинку (К-01, 23.10) — бот грузит новую, а не старую."""
     import media as M
@@ -480,6 +573,7 @@ async def main():
     await flow_red_and_links()
     await flow_materials()
     media_check()
+    screen_check()
     await cache_check()
     vids = [p.get("caption") or "" for ch, n, p, m in SENT if n == "SendVideo"]
     expect(any("опыт эфиров" in c.lower() and "Вопрос" in c for c in vids), "вопрос анкеты про опыт эфиров — видео баттла (В-08)")
@@ -494,7 +588,7 @@ async def main():
     print(f"\nВремя обработки нажатия внутри бота (без сети Telegram), {len(ms)} нажатий: "
           f"середина {ms[len(ms) // 2]:.0f} мс, 95% — до {ms[int(len(ms) * .95)]:.0f} мс, худшее {ms[-1]:.0f} мс")
     sends = sorted({n for _, _, n in TIMES})
-    print(f"Сообщений на одно нажатие: от {min(sends)} до {max(sends)}")
+    print(f"Сообщений человеку на одно действие: от {min(sends)} до {max(sends)}")
     print("\nИТОГ:", "всё прошло ✅" if not PROBLEMS else f"проблем: {len(PROBLEMS)}")
     for p in PROBLEMS:
         print("  •", p)

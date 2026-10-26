@@ -44,11 +44,27 @@ def ev(uid, event, details=""):
     bg(db.log_event, uid, event, details)
 
 
+# Сколько знаков помещается в кнопку на телефоне шириной 375 pt, если в ряду 2 или 3 кнопки (длиннее — Telegram режет «…»)
+BTN_FIT = {1: 34, 2: 17, 3: 11, 4: 7}
+
+
+def split_rows(rows):
+    """Ряд, где хоть одна кнопка не помещается целиком, раскладываем по одной кнопке в ряд (правка 26.10)."""
+    out = []
+    for row in rows:
+        n = len(row)
+        if n > 1 and any(len(b[0]) > BTN_FIT.get(n, 7) for b in row):
+            out += [[b] for b in row]
+        else:
+            out.append(row)
+    return out
+
+
 def kb(rows):
     if not rows:
         return None
     out = []
-    for row in rows:
+    for row in split_rows(rows):
         r = []
         for b in row:
             text, action = b[0], b[1]
@@ -198,13 +214,8 @@ async def sc_red(bot, uid, s, **kw):
     return await send_msgs(bot, uid, C.S["red"], fmt={"reasons": reasons})
 
 
-async def sc_t3(bot, uid, s, **kw):
-    await send_msgs(bot, uid, C.S["t3"])
-    s["menu_shown"] = True
-    return await show(bot, uid, s, "offer")
-
-
 async def sc_offer(bot, uid, s, **kw):
+    s["menu_shown"] = True
     want = s["ans"].get("Желаемый доход")
     big = want in ("100–300 тыс. ₽", "больше 300 тыс. ₽")
     pro = str(s.get("src", "")).startswith("partner") or big or s.get("why") in ("Уже стримлю и хочу больше", "Ищу своё дело")
@@ -258,8 +269,9 @@ async def sc_vCard(bot, uid, s, **kw):
 
 
 async def sc_aDone(bot, uid, s, **kw):
-    await send_msgs(bot, uid, C.S["aDone"])
-    m = await show(bot, uid, s, "way")
+    m = await send_msgs(bot, uid, C.S["aDone"])
+    s["screen"] = "way"
+    ev(uid, "screen", "way")
     asyncio.create_task(save_lead(bot, uid, json.loads(json.dumps(s)), status="анкета", notify=True))
     return m
 
@@ -337,8 +349,9 @@ async def sc_phone(bot, uid, s, **kw):
 
 async def sc_chatWay(bot, uid, s, **kw):
     s["way"] = "chat"
-    await send_msgs(bot, uid, C.S["chatWay"])
-    return await show(bot, uid, s, "day")
+    s["screen"] = "day"
+    ev(uid, "screen", "day")
+    return await sc_day(bot, uid, s, prefix=C.S["chatWay"][0]["text"])
 
 
 # ---------------- запись на разговор ----------------
@@ -371,7 +384,7 @@ def win_word(n):
     return f"{n} окон"
 
 
-async def sc_day(bot, uid, s, **kw):
+async def sc_day(bot, uid, s, prefix="", **kw):
     s["expect"] = None
     def _days():
         t0 = int(msk().replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
@@ -390,7 +403,7 @@ async def sc_day(bot, uid, s, **kw):
         pre = "Сегодня, " if i == 0 else ("Завтра, " if i == 1 else "")
         rows.append([(f"{pre}{dd(d)} · {win_word(len(f))}", f"day:{i}")])
     rows.append([("Другой день", "daymore")])
-    return await bot.send_message(uid, C.DAY_TEXT, reply_markup=kb(rows))
+    return await bot.send_message(uid, (prefix + "\n\n" if prefix else "") + C.DAY_TEXT, reply_markup=kb(rows))
 
 
 async def sc_time(bot, uid, s, day_off=0, **kw):
@@ -417,13 +430,14 @@ async def sc_done(bot, uid, s, ts=0, **kw):
     lead = await asyncio.to_thread(db.lead_get_open, uid)
     mine = lead and lead.get("slot_ts") == ts
     if taken and not mine:
-        await bot.send_message(uid, C.SLOT_TAKEN)
-        return await show(bot, uid, s, "day")
+        s["screen"] = "day"
+        ev(uid, "screen", "day")
+        return await sc_day(bot, uid, s, prefix=C.SLOT_TAKEN)
     resched = bool(lead and lead.get("slot_ts") and lead.get("status") in ("записана", "перенесена"))
     s["slot"] = ts
-    await send_msgs(bot, uid, C.S["done"])
     t, rows = C.DONE_TEAM if s.get("br") == "team" else C.DONE_PARTNER
-    m = await bot.send_message(uid, t, reply_markup=kb(rows))
+    x = C.S["done"][0]
+    m = await send_msgs(bot, uid, [dict(media=x["media"], text=x["text"] + "\n\n" + t, kb=rows)])
     # напоминания: за сутки, за 2 часа, за 15 минут; старые — отменить; дожим партнёрства — больше не нужен
     await asyncio.to_thread(db.cancel, uid, ["rem24", "rem2", "rem15", "dz1", "dz3", "dz6", "dzTip", "month"])
     now = time.time()
@@ -487,7 +501,7 @@ async def sc_material(bot, uid, s, name, **kw):
     return await send_msgs(bot, uid, C.S[name])
 
 
-SPECIAL = {"under18": sc_under18, "red": sc_red, "t3": sc_t3, "offer": sc_offer, "aIntro": sc_aIntro, "vCard": sc_vCard,
+SPECIAL = {"under18": sc_under18, "red": sc_red, "offer": sc_offer, "aIntro": sc_aIntro, "vCard": sc_vCard,
            "aDone": sc_aDone, "p1": sc_p1, "p3": sc_p3, "calc": sc_calc, "phone": sc_phone, "chatWay": sc_chatWay,
            "day": sc_day, "time": sc_time, "confirm": sc_confirm, "done": sc_done, "notActual": sc_notActual,
            "testIntro": sc_testIntro,
@@ -538,14 +552,11 @@ async def test_result(bot, uid, s):
     bg(db.cancel, uid, ["dzTest"])
     ev(uid, f"test_verdict_{v}", t)
     title, body = C.TEST_RES[t]
-    await bot.send_message(uid, f"Твой типаж: <b>{title}</b>\n\n{body}")
-    if v == "green":
-        await bot.send_message(uid, C.VERDICT_GREEN)
-    elif v == "yellow":
-        await bot.send_message(uid, C.VERDICT_YELLOW.format(flag=C.TEST_FLAGS[s["flags"][0]]))
-    if v == "red":
-        return await show(bot, uid, s, "red")
-    return await show(bot, uid, s, "fork")
+    head = f"Твой типаж: <b>{title}</b>\n\n{body}\n\n"
+    if v == "red":              # типаж, а по «Дальше» — честное «сейчас не твоё» с причинами (вместе не помещаются на экран)
+        return await bot.send_message(uid, head.rstrip(), reply_markup=kb([[("Дальше →", "g:red")]]))
+    verdict = C.VERDICT_GREEN if v == "green" else C.VERDICT_YELLOW.format(flag=C.TEST_FLAGS[s["flags"][0]])
+    return await bot.send_message(uid, head + verdict, reply_markup=kb([[("Дальше →", "g:fork")]]))
 
 
 # ---------------- заявка → представителю ----------------
@@ -757,7 +768,8 @@ async def h_cb(cb: CallbackQuery):
 async def handle_action(bot, uid, s, a, arg, cb=None):
     if a == "g":
         if arg in C.S or arg in SPECIAL:
-            s["expect"] = None
+            if arg != "vExample":            # пример баттла смотрят, пока бот ждёт видео 2 из 2
+                s["expect"] = None
             return await show(bot, uid, s, arg)
         return
     if a in ("s1", "s2", "s3", "s4", "s5"):
@@ -938,7 +950,6 @@ async def h_video(msg: Message):
             s["ans"]["Визитка"] = ("кружок" if item["note"] else "видео") + f" {item['dur'] // 60}:{item['dur'] % 60:02d}"
             ev(uid, "video", "card")
             s["expect"] = "video_battle"
-            await show(msg.bot, uid, s, "vExample")
             await show(msg.bot, uid, s, "vBattle")
             s["expect"] = "video_battle"
         else:

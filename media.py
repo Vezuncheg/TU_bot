@@ -80,7 +80,9 @@ def _remember(key, file_id):
 
 
 async def send(bot: Bot, chat_id, key, caption=None, reply_markup=None):
-    """Отправить медиа по ключу. Возвращает Message."""
+    """Отправить медиа по ключу. Возвращает Message.
+    Подпись — над картинкой или видео (show_caption_above_media, правило 26.10): человек сначала видит текст."""
+    above = True if caption else None
     key = resolve(key)
     kind = key.split(":", 1)[0]
     fid = _get(key)
@@ -88,13 +90,14 @@ async def send(bot: Bot, chat_id, key, caption=None, reply_markup=None):
         src = fid if (fid and attempt == 0) else FSInputFile(path_of(key))
         try:
             if kind == "card":
-                m = await bot.send_photo(chat_id, src, caption=caption or None, reply_markup=reply_markup)
+                m = await bot.send_photo(chat_id, src, caption=caption or None, reply_markup=reply_markup,
+                                         show_caption_above_media=above)
                 new_id = m.photo[-1].file_id if m.photo else None
             elif kind == "video":
                 meta = _manifest.get(key, {})
                 m = await bot.send_video(chat_id, src, caption=caption or None, reply_markup=reply_markup,
                                          width=meta.get("w"), height=meta.get("h"), duration=meta.get("dur"),
-                                         supports_streaming=True)
+                                         supports_streaming=True, show_caption_above_media=above)
                 new_id = m.video.file_id if m.video else None
             else:
                 m = await bot.send_document(chat_id, src, caption=caption or None, reply_markup=reply_markup)
@@ -115,7 +118,7 @@ def input_media(key):
     """Для правки сообщения (калькулятор): InputMediaPhoto по file_id или файлу."""
     from aiogram.types import InputMediaPhoto
     fid = _get(key)
-    return InputMediaPhoto(media=fid or FSInputFile(path_of(key)))
+    return InputMediaPhoto(media=fid or FSInputFile(path_of(key)), show_caption_above_media=True)
 
 
 def remember_from(key, message):
