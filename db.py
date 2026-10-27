@@ -16,28 +16,59 @@ if PG:
     from psycopg2.pool import ThreadedConnectionPool
 
     _pool = None
+    _pool_lock = threading.Lock()
+    # 27.10: раньше пул был (1, 8) — psycopg2 держит открытыми только minconn соединений, остальные закрывает.
+    # Каждое нажатие пишет в базу 4–5 раз параллельно → новое подключение к Supabase на каждую запись (≈0,5–1 с),
+    # а больше 8 записей сразу — ошибка «pool exhausted» и экран не приходит. Теперь держим все соединения открытыми,
+    # а при нехватке ждём свободное.
+    _POOL_N = max(2, int(__import__("os").getenv("DB_POOL", "6")))
+    _slots = threading.BoundedSemaphore(_POOL_N)
+    _IDLE_MAX = 240          # соединение без дела дольше 4 минут переоткрываем: пулер Supabase может его уже закрыть
+    _last_use = {}           # id(conn) → время последнего использования
 
     def _get_pool():
         global _pool
         if _pool is None:
-            _pool = ThreadedConnectionPool(1, 8, dsn=config.DATABASE_URL)
+            with _pool_lock:
+                if _pool is None:
+                    _pool = ThreadedConnectionPool(1, _POOL_N, dsn=config.DATABASE_URL, keepalives=1,
+                                                   keepalives_idle=30, keepalives_interval=10, keepalives_count=3)
+                    _pool.minconn = _POOL_N      # открываем по мере надобности, но обратно в пул кладём все
         return _pool
 
     class _Ctx:
         def __enter__(self):
             if _SIM:
                 time.sleep(_SIM)
-            self.conn = _get_pool().getconn()
-            self.conn.autocommit = True
-            self.cur = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            _slots.acquire()
+            try:
+                pool = _get_pool()
+                conn = pool.getconn()
+                if conn.closed or time.time() - _last_use.get(id(conn), time.time()) > _IDLE_MAX:
+                    _last_use.pop(id(conn), None)
+                    pool.putconn(conn, close=True)
+                    conn = pool.getconn()
+                self.conn = conn
+                self.conn.autocommit = True
+                self.cur = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            except Exception:
+                _slots.release()
+                raise
             return self.cur
 
         def __exit__(self, et, ev, tb):
             try:
                 self.cur.close()
             finally:
+                bad = bool(et and isinstance(ev, (psycopg2.OperationalError, psycopg2.InterfaceError)))
+                _last_use[id(self.conn)] = time.time()
+                if bad:
+                    _last_use.pop(id(self.conn), None)
                 # соединение с ошибкой не возвращаем в пул целым — закрываем
-                _get_pool().putconn(self.conn, close=bool(et and isinstance(ev, psycopg2.OperationalError)))
+                try:
+                    _get_pool().putconn(self.conn, close=bad)
+                finally:
+                    _slots.release()
 
     def _q(sql):
         return sql

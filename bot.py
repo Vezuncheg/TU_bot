@@ -120,6 +120,8 @@ def mask_phone(p):
 # =====================================================================
 _sessions = {}
 _locks = {}
+_last_tap = {}           # uid → ((message_id, callback_data), время) — защита от двойных нажатий
+TAP_REPEAT_SEC = 1.5
 
 
 def lock(uid):
@@ -749,10 +751,21 @@ class Latency(BaseMiddleware):
 async def h_cb(cb: CallbackQuery):
     uid = cb.from_user.id
     data = cb.data or ""
+    # 27.10: пока бот отвечает на прошлое нажатие, повторные не ставим в очередь — иначе экран приходит 2–3 раза.
+    # Ту же кнопку того же сообщения сразу после ответа тоже пропускаем (кроме калькулятора — там жмут подряд).
+    mid = cb.message.message_id if cb.message else 0
+    key = (mid, data)
+    busy = lock(uid).locked()
+    again = not data.startswith("calc:") and _last_tap.get(uid, (None, 0))[0] == key \
+        and time.monotonic() - _last_tap[uid][1] < TAP_REPEAT_SEC
     try:
-        await cb.answer()                       # сразу убрать «часики» на кнопке
+        await cb.answer(C.TAP_WAIT if busy else None)   # сразу убрать «часики» на кнопке
     except Exception:
         pass
+    if busy or again:
+        ev(uid, "dup_tap", data)
+        return
+    _last_tap[uid] = (key, time.monotonic())
     async with lock(uid):
         s = await get_sess(uid)
         ev(uid, "btn", data)
@@ -763,6 +776,7 @@ async def h_cb(cb: CallbackQuery):
         except TelegramForbiddenError:
             bg(db.set_user, uid, no_warmup=1)
         await save_sess(uid, s)
+    _last_tap[uid] = (key, time.monotonic())       # отсчёт — от конца ответа: человек ещё не увидел новый экран
 
 
 async def handle_action(bot, uid, s, a, arg, cb=None):
@@ -961,6 +975,15 @@ async def h_video(msg: Message):
         await save_sess(uid, s)
 
 
+_menu_last = {}          # uid → (кнопка нижнего меню, когда закончили отвечать)
+
+
+def _menu_repeat(uid, text):
+    """Та же кнопка нижнего меню через пару секунд после ответа — это повторное нажатие, а не новый запрос."""
+    last, t = _menu_last.get(uid, (None, 0))
+    return last == text and time.monotonic() - t < 3
+
+
 @router.message(F.chat.type == "private", F.text)
 async def h_text(msg: Message):
     uid = msg.from_user.id
@@ -969,10 +992,13 @@ async def h_text(msg: Message):
         s = await get_sess(uid)
         bot = msg.bot
         exp = s.get("expect")
-        if text in C.REPLY_ROUTES and exp not in ("phone",):
+        if text in C.REPLY_ROUTES and exp not in ("phone",) and _menu_repeat(uid, text):
+            ev(uid, "dup_tap", text)          # 27.10: кнопку нижнего меню нажали ещё раз, пока шёл ответ
+        elif text in C.REPLY_ROUTES and exp not in ("phone",):
             s["expect"] = None
             ev(uid, "menu_btn", text)
             await show(bot, uid, s, C.REPLY_ROUTES[text])
+            _menu_last[uid] = (text, time.monotonic())
         elif exp == "phone":
             if text == C.PHONE_MANUAL:
                 await bot.send_message(uid, C.PHONE_ASK)
@@ -1122,6 +1148,11 @@ async def main():
     asyncio.create_task(set_avatar(bot))
     if config.MEDIA_WARMUP_CHAT_ID:
         asyncio.create_task(media.warmup(bot, config.MEDIA_WARMUP_CHAT_ID))
+    else:
+        miss = [k for k in media.all_keys() if not media._get(k)]
+        if miss:
+            log.warning(f"MEDIA_WARMUP_CHAT_ID не задан: {len(miss)} картинок и видео ещё не загружены в Telegram — "
+                        f"первый показ каждой будет медленным")
     asyncio.create_task(scheduler(bot))
     log.info("TeamUniverse bot started (v2)")
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())

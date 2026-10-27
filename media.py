@@ -88,6 +88,13 @@ async def send(bot: Bot, chat_id, key, caption=None, reply_markup=None):
     fid = _get(key)
     for attempt in (0, 1):
         src = fid if (fid and attempt == 0) else FSInputFile(path_of(key))
+        if not isinstance(src, str):
+            # 27.10: файл грузится в Telegram впервые — это долго; пусть человек видит «отправляет фото/видео…»
+            act = {"card": "upload_photo", "video": "upload_video"}.get(kind, "upload_document")
+            try:
+                await bot.send_chat_action(chat_id, act)
+            except Exception:
+                pass
         try:
             if kind == "card":
                 m = await bot.send_photo(chat_id, src, caption=caption or None, reply_markup=reply_markup,

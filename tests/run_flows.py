@@ -38,6 +38,11 @@ PROBLEMS = []
 _mid = [1000]
 
 
+def is_msg(x):
+    """Сообщение человеку; «отправляет фото…» (SendChatAction) сообщением не считаем."""
+    return x[1].startswith("Send") and x[1] != "SendChatAction"
+
+
 class FakeSession(BaseSession):
     async def make_request(self, bot, method: TelegramMethod, timeout=None):
         name = type(method).__name__
@@ -121,7 +126,7 @@ async def feed(uid, *, text=None, data=None, video_note=False, video=False, cont
     await settle()                  # дождаться фоновых записей в базу и карточек
     out = SENT[n0:]
     check(out)
-    to_user = [x for x in out if x[0] == uid and x[1].startswith("Send")]
+    to_user = [x for x in out if x[0] == uid and is_msg(x)]
     TIMES.append((data or text or "media", ms, len(to_user)))
     allowed = 2 if contact else 1          # номер телефона: «Номер записал» (вернуть нижнее меню) + выбор дня — обе короткие
     if len(to_user) > allowed:
@@ -312,7 +317,7 @@ async def flow_partner():
     expect(B._sessions[uid]["p1step"] == 2, "после перезапуска таймер сработал: третье преимущество пришло само")
     n_before = len(SENT)
     await feed(uid, data="p1:2")     # старая кнопка «Далее» — повтор не шлём
-    expect(len([x for x in SENT[n_before:] if x[1].startswith("Send")]) == 0, "повторное «Далее» не дублирует сообщение")
+    expect(len([x for x in SENT[n_before:] if is_msg(x)]) == 0, "повторное «Далее» не дублирует сообщение")
     await press(uid, "Далее")
     expect(not db.pending(uid, "p1"), "после последнего шага таймера нет")
     out = await press(uid, "Сколько можно зарабатывать")
@@ -557,6 +562,42 @@ async def cache_check():
     M._fp.pop("card:t1")
 
 
+async def double_tap_check():
+    """27.10: двойное и тройное нажатие одной кнопки — один ответ; кнопка нижнего меню дважды — один ответ."""
+    uid = 960
+    await feed(uid, text="/start")
+    data = last_kb(uid)[0]["callback_data"]
+    mid = _mid[0]
+
+    def upd(d):
+        _upd[0] += 1
+        last = Message(message_id=mid, date=datetime.now(), chat=Chat(id=uid, type="private"), text="x")
+        return Update(update_id=_upd[0], callback_query=CallbackQuery(id=str(_upd[0]), from_user=user(uid), chat_instance="c", data=d, message=last))
+    n0 = len(SENT)
+    await asyncio.gather(*(dp.feed_update(bot, upd(data)) for _ in range(3)))
+    await settle()
+    got = len([x for x in SENT[n0:] if x[0] == uid and is_msg(x)])
+    hint = [x for x in SENT[n0:] if x[1] == "AnswerCallbackQuery" and x[2].get("text") == C.TAP_WAIT]
+    expect(got == 1, f"три быстрых нажатия одной кнопки — один ответ (пришло {got})")
+    expect(len(hint) == 2, "на лишние нажатия — подсказка «Секунду, уже отвечаю»")
+    n0 = len(SENT)
+    await dp.feed_update(bot, upd(data))          # та же кнопка сразу после ответа
+    await settle()
+    expect(not [x for x in SENT[n0:] if x[0] == uid and is_msg(x)], "ту же кнопку сразу после ответа — не дублируем")
+    menu = next(iter(C.REPLY_ROUTES))
+    n0 = len(SENT)
+
+    def mupd():
+        _upd[0] += 1
+        return Update(update_id=_upd[0], message=Message(message_id=_upd[0], date=datetime.now(), chat=Chat(id=uid, type="private"),
+                                                         from_user=user(uid), text=menu))
+    await asyncio.gather(dp.feed_update(bot, mupd()), dp.feed_update(bot, mupd()))
+    await settle()
+    got = len([x for x in SENT[n0:] if x[0] == uid and is_msg(x)])
+    expect(got == 1, f"кнопка нижнего меню дважды подряд — один ответ (пришло {got})")
+    B._last_tap.clear(); B._menu_last.clear()
+
+
 async def main():
     if os.path.exists(DB_FILE):
         os.remove(DB_FILE)
@@ -575,6 +616,7 @@ async def main():
     media_check()
     screen_check()
     await cache_check()
+    await double_tap_check()
     vids = [p.get("caption") or "" for ch, n, p, m in SENT if n == "SendVideo"]
     expect(any("опыт эфиров" in c.lower() and "Вопрос" in c for c in vids), "вопрос анкеты про опыт эфиров — видео баттла (В-08)")
     expect(any("3 вопроса перед консультацией" in c for c in vids), "перед консультацией — видео баттла (В-09), вопрос в подписи")
