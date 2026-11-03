@@ -620,11 +620,16 @@ async def new_bot_check():
     expect([x[1] for x in SENT[n0:]].count("SetMyProfilePhoto") == 1, "аватарка ставится один раз")
     total = len(M.all_keys())
     n0 = len(SENT)
+    B.config.MEDIA_WARMUP_CHAT_ID = 0
+    await B.warmup_media(bot)
+    expect(not [x for x in SENT[n0:] if x[1] in ("SendPhoto", "SendVideo")], "без служебного чата прогрев не шлёт ничего в личку людям (03.11)")
+    B.config.MEDIA_WARMUP_CHAT_ID = -100555
+    n0 = len(SENT)
     await B.warmup_media(bot)
     await settle()
     up = [x for x in SENT[n0:] if x[1] in ("SendPhoto", "SendVideo")]
     dels = [x for x in SENT[n0:] if x[1] == "DeleteMessage"]
-    expect(len(up) == total and all(x[0] == 777 for x in up), f"прогрев: все файлы ({len(up)} из {total}) — в личный чат Артёма")
+    expect(len(up) == total and all(x[0] == -100555 for x in up), f"прогрев: все файлы ({len(up)} из {total}) — только в служебный чат")
     expect(all(x[2].get("disable_notification") for x in up) and len(dels) == len(up), "прогрев без звука, каждое сообщение удалено")
     n0 = len(SENT)
     await B.warmup_media(bot)

@@ -1136,20 +1136,21 @@ async def set_profile(bot):
 
 
 async def warmup_media(bot):
-    """Прогрев медиа: в служебный чат, если задан MEDIA_WARMUP_CHAT_ID, иначе — в личный чат Артёма с ботом
-    (тихо, каждое сообщение сразу удаляется; предложено 27.10, принято 03.11)."""
-    chat = config.MEDIA_WARMUP_CHAT_ID or config.ARTEM_CHAT_ID
+    """Прогрев медиа — только в служебный чат MEDIA_WARMUP_CHAT_ID.
+    03.11: прогрев в личный чат Артёма снят. Сообщения удалялись, пока телефон их ещё скачивал, и в этом чате
+    картинки перестали скачиваться сами (жалоба Артёма 03.11). В чат живого человека прогрев не шлём."""
+    chat = config.MEDIA_WARMUP_CHAT_ID
     miss = [k for k in media.all_keys() if not media._get(k)]
     if not miss:
         return
     if not chat:
-        log.warning(f"прогрев медиа: некуда грузить, {len(miss)} файлов — первый показ каждого будет медленным")
+        log.warning(f"прогрев медиа: MEDIA_WARMUP_CHAT_ID не задан, {len(miss)} файлов загрузятся при первом показе")
         return
     try:
         await bot.send_chat_action(chat, "upload_photo")
     except Exception as e:
         log.warning(f"прогрев медиа: чат {chat} недоступен ({e}) — "
-                    f"нажмите «Старт» в боте или задайте MEDIA_WARMUP_CHAT_ID, затем перезапустите сервис")
+                    f"бот должен быть админом служебного канала")
         return
     log.info(f"прогрев медиа: {len(miss)} файлов в чат {chat}")
     await media.warmup(bot, chat)
