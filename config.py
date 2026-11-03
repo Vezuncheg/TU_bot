@@ -22,6 +22,9 @@ DB_PATH = os.getenv("DB_PATH", "tu_bot.sqlite3")
 ARTEM_CHAT_ID = _int("ARTEM_CHAT_ID")
 WORK_CHAT_ID = _int("WORK_CHAT_ID")
 LEADS_CHAT_ID = _int("LEADS_CHAT_ID") or WORK_CHAT_ID or ARTEM_CHAT_ID
+# 03.11 (просьба Артёма): заявки и вопросы ВСЕГДА приходят Артёму в личку с возможностью ответить;
+# рабочая группа (если задана) получает копию. Раньше при заданной группе в личку не шло ничего.
+LEAD_CHATS = list(dict.fromkeys(x for x in (ARTEM_CHAT_ID, LEADS_CHAT_ID) if x))
 ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().lstrip("-").isdigit()}
 if ARTEM_CHAT_ID > 0:
     ADMIN_IDS.add(ARTEM_CHAT_ID)

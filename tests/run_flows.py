@@ -35,6 +35,7 @@ import migrate                                                       # noqa: E40
 SENT = []          # (chat_id, method, params)
 SUBS = {}          # uid → "left" / "error"; остальные считаются подписанными
 PROBLEMS = []
+FAIL_CHATS = set()  # чаты, куда бот «не может писать» (бот не в группе)
 _mid = [1000]
 
 
@@ -48,6 +49,8 @@ class FakeSession(BaseSession):
         name = type(method).__name__
         params = method.model_dump(exclude_none=True)
         SENT.append((params.get("chat_id"), name, params, method))
+        if params.get("chat_id") in FAIL_CHATS and (name.startswith("Send") or name in ("GetChat", "ForwardMessage")):
+            raise TelegramBadRequest(method=method, message="Bad Request: chat not found")
         if name == "GetChatMember":
             uid = int(params["user_id"]); st = SUBS.get(uid, "member"); u = User(id=uid, is_bot=False, first_name="x")
             if st == "error":
@@ -294,6 +297,16 @@ async def flow_team():
         rid = db._one(c)["message_id"]
     out = await feed(9, text="Катя, привет! Позвоню чуть раньше", chat_id=-1001, reply_to=rid)
     expect(any(ch == uid and "представителя" in (p.get("text") or "") for ch, n, p, m in out), "ответ представителя дошёл человеку")
+    # 03.11: заявка приходит и Артёму в личку, ответить можно прямо оттуда
+    expect(any("ЗАПИСЬ" in (p.get("text") or "") for ch, n, p, m in SENT if ch == 777), "запись пришла Артёму в личку (03.11)")
+    with db._Ctx() as c:
+        c.execute(db._q("SELECT message_id FROM relay WHERE user_id=%s AND chat_id=%s ORDER BY message_id DESC LIMIT 1"), (uid, 777))
+        rid777 = db._one(c)["message_id"]
+    out = await feed(777, text="Привет! Это ответ из лички", reply_to=rid777)
+    expect(any(ch == uid and "ответ из лички" in (p.get("text") or "") for ch, n, p, m in out), "ответ Артёма из лички дошёл человеку")
+    expect(any(ch == 777 and p.get("text") == C.RELAY_SENT for ch, n, p, m in out), "Артёму пришло «Отправил»")
+    out = await feed(777, text="☰ Меню", reply_to=_mid[0] + 500)
+    expect(any(ch == 777 and is_msg((ch, n, p, m)) for ch, n, p, m in out), "ответ Артёма не на заявку — бот работает как обычно")
 
 
 async def flow_partner():
@@ -634,6 +647,22 @@ async def new_bot_check():
     n0 = len(SENT)
     await B.warmup_media(bot)
     expect(not [x for x in SENT[n0:] if x[1] in ("SendPhoto", "SendVideo")], "повторный прогрев ничего не грузит")
+    # бот не в рабочей группе: заявка всё равно приходит Артёму, и он узнаёт о проблеме (03.11)
+    FAIL_CHATS.add(-1001)
+    B._team_warned.clear()
+    n0 = len(SENT)
+    await B.to_team(bot, 9, "❓ Вопрос от Кати")
+    await B.to_team(bot, 9, "❓ Ещё вопрос")
+    to_artem = [p.get("text") or "" for ch, n, p, m in SENT[n0:] if ch == 777 and n == "SendMessage"]
+    expect(sum("Вопрос от Кати" in t for t in to_artem) == 1 and sum("Ещё вопрос" in t for t in to_artem) == 1,
+           "бота нет в группе — вопросы всё равно приходят Артёму")
+    expect(sum("Не могу писать в рабочую группу" in t for t in to_artem) == 1, "Артём один раз получил предупреждение «добавьте бота в группу»")
+    n0 = len(SENT)
+    B._team_warned.clear()
+    await B.check_team_chats(bot)
+    expect(any("не видит рабочую группу" in (p.get("text") or "") for ch, n, p, m in SENT[n0:] if ch == 777),
+           "при запуске бот проверяет группу и предупреждает Артёма")
+    FAIL_CHATS.clear()
     k = M.all_keys()[0]
     M.BOT_ID = 999
     expect(M._get(k) is None, "у другого бота свой кэш: file_id прежнего бота не используются")

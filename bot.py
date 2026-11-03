@@ -12,6 +12,7 @@ from aiogram import Bot, Dispatcher, F, Router, BaseMiddleware
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (BotCommand, CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup,
                            InputProfilePhotoAnimated, KeyboardButton, Message, ReplyKeyboardMarkup)
@@ -598,24 +599,47 @@ async def save_lead(bot, uid, s, status, notify=False, slot=None):
         fields["video_battle"] = s["video_battle"]["id"]
     await asyncio.to_thread(db.lead_save, uid, **fields)
     ev(uid, "lead", f"{s.get('br')} {status}")
-    if not notify or not config.LEADS_CHAT_ID:
+    if not notify:
         return
-    try:
-        m = await bot.send_message(config.LEADS_CHAT_ID, lead_card(u, s, status, slot))
-        bg(db.relay_set, config.LEADS_CHAT_ID, m.message_id, uid)
-        if status == "анкета":
-            for key in ("video_card", "video_battle"):
-                v = s.get(key)
-                if not v:
-                    continue
+    vids = []
+    if status == "анкета":
+        for key in ("video_card", "video_battle"):
+            if s.get(key):
+                vids.append((s[key], "Видео-визитка" if key == "video_card" else "Видео баттла"))
+    await notify_team(bot, uid, lead_card(u, s, status, slot), vids)
+
+
+_team_warned = set()
+
+
+async def notify_team(bot, uid, text, videos=(), forward=None):
+    """Сообщение представителю: в личку Артёму и в рабочую группу (если задана). На каждое сообщение можно
+    ответить через «Ответить» — бот перешлёт ответ человеку. Не дошло в какой-то чат — Артём узнаёт об этом."""
+    fails = []
+    for chat in config.LEAD_CHATS:
+        try:
+            m = await bot.send_message(chat, text)
+            await asyncio.to_thread(db.relay_set, chat, m.message_id, uid)
+            for v, cap in videos:
                 if v.get("note"):
-                    vm = await bot.send_video_note(config.LEADS_CHAT_ID, v["id"], reply_to_message_id=m.message_id)
+                    vm = await bot.send_video_note(chat, v["id"], reply_to_message_id=m.message_id)
                 else:
-                    vm = await bot.send_video(config.LEADS_CHAT_ID, v["id"], reply_to_message_id=m.message_id,
-                                              caption="Видео-визитка" if key == "video_card" else "Видео баттла")
-                bg(db.relay_set, config.LEADS_CHAT_ID, vm.message_id, uid)
-    except Exception as e:
-        log.warning(f"lead notify: {e}")
+                    vm = await bot.send_video(chat, v["id"], reply_to_message_id=m.message_id, caption=cap)
+                bg(db.relay_set, chat, vm.message_id, uid)
+            if forward is not None:
+                fm = await forward.forward(chat)
+                bg(db.relay_set, chat, fm.message_id, uid)
+        except Exception as e:
+            log.warning(f"заявка/вопрос не дошли в чат {chat}: {e}")
+            fails.append((chat, e))
+    for chat, e in fails:
+        if chat != config.ARTEM_CHAT_ID and chat not in _team_warned and config.ARTEM_CHAT_ID:
+            _team_warned.add(chat)
+            try:
+                await bot.send_message(config.ARTEM_CHAT_ID, f"⚠️ Не могу писать в рабочую группу {chat}: {e}\n"
+                                       f"Добавьте бота в группу. Заявки пока приходят только сюда.")
+            except Exception:
+                pass
 
 
 async def forward_if_lead(bot, uid, text):
@@ -627,17 +651,11 @@ async def forward_if_lead(bot, uid, text):
         log.warning(f"forward_if_lead: {e}")
 
 
-async def to_team(bot, uid, text):
+async def to_team(bot, uid, text, forward=None):
     """Сообщение представителю (вопрос, просьба познакомить) с возможностью ответить через бота."""
-    if not config.LEADS_CHAT_ID:
-        return
     u = await asyncio.to_thread(db.get_user, uid) or {"user_id": uid}
     who = f"@{u['username']}" if u.get("username") else f"<a href=\"tg://user?id={uid}\">{u.get('first_name') or 'профиль'}</a>"
-    try:
-        m = await bot.send_message(config.LEADS_CHAT_ID, f"{text}\nОт: {who} · id {uid}\n\n{C.LEAD_FORWARD_HINT}")
-        bg(db.relay_set, config.LEADS_CHAT_ID, m.message_id, uid)
-    except Exception as e:
-        log.warning(f"to_team: {e}")
+    await notify_team(bot, uid, f"{text}\nОт: {who} · id {uid}\n\n{C.LEAD_FORWARD_HINT}", forward=forward)
 
 
 # =====================================================================
@@ -902,12 +920,12 @@ async def handle_action(bot, uid, s, a, arg, cb=None):
         return await bot.send_message(uid, C.MEETPARTNER_OK)
 
 
-@router.message(F.chat.id == config.LEADS_CHAT_ID, F.reply_to_message)
+@router.message(F.chat.id.in_(set(config.LEAD_CHATS)), F.reply_to_message)
 async def h_relay(msg: Message):
-    """Представитель ответил на карточку заявки — пересылаем человеку."""
+    """Представитель ответил на карточку заявки (в личке Артёма или в группе) — пересылаем человеку."""
     uid = await asyncio.to_thread(db.relay_get, msg.chat.id, msg.reply_to_message.message_id)
     if not uid:
-        return
+        raise SkipHandler()     # ответ не на заявку — пусть обработает обычный обработчик (Артём тоже ходит по боту)
     try:
         if msg.text:
             await msg.bot.send_message(uid, C.FROM_TEAM.format(text=msg.html_text))
@@ -949,8 +967,7 @@ async def h_video(msg: Message):
         if exp not in ("video_card", "video_battle"):
             lead = await asyncio.to_thread(db.lead_get_open, uid)
             if lead:
-                await to_team(msg.bot, uid, "🎥 Прислала видео вне анкеты (ниже)")
-                await msg.forward(config.LEADS_CHAT_ID) if config.LEADS_CHAT_ID else None
+                await to_team(msg.bot, uid, "🎥 Прислала видео вне анкеты (ниже)", forward=msg)
             else:
                 await show(msg.bot, uid, s, "freeText")
             await save_sess(uid, s)
@@ -1120,6 +1137,25 @@ async def set_avatar(bot):
         log.warning(f"аватарка: {e}")
 
 
+async def check_team_chats(bot):
+    """При запуске: куда пойдут заявки и доступны ли эти чаты (03.11: после смены бота заявки не доходили молча)."""
+    if not config.ARTEM_CHAT_ID:
+        log.warning("ARTEM_CHAT_ID не задан — заявки в личку не придут")
+    for chat in config.LEAD_CHATS:
+        try:
+            await bot.get_chat(chat)
+            log.info(f"заявки: чат {chat} доступен")
+        except Exception as e:
+            log.warning(f"заявки: чат {chat} недоступен ({e})")
+            if chat != config.ARTEM_CHAT_ID and config.ARTEM_CHAT_ID:
+                _team_warned.add(chat)
+                try:
+                    await bot.send_message(config.ARTEM_CHAT_ID, f"⚠️ Бот не видит рабочую группу {chat}: {e}\n"
+                                           f"Добавьте бота в группу. Заявки пока приходят только сюда.")
+                except Exception:
+                    pass
+
+
 async def set_profile(bot):
     """Имя, описание и короткое описание бота — один раз на бота и версию текстов (03.11, переезд на новый токен)."""
     flag = f"profile_{C.PROFILE_VER}_{bot.id}"
@@ -1185,6 +1221,7 @@ async def main():
                                BotCommand(command="menu", description="☰ Меню")])
     asyncio.create_task(set_avatar(bot))
     asyncio.create_task(set_profile(bot))
+    asyncio.create_task(check_team_chats(bot))
     asyncio.create_task(warmup_media(bot))
     asyncio.create_task(scheduler(bot))
     log.info("TeamUniverse bot started (v2)")
