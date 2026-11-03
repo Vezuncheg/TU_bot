@@ -25,7 +25,7 @@ from aiogram.client.session.base import BaseSession                 # noqa: E402
 from aiogram.methods import TelegramMethod                          # noqa: E402
 from aiogram.types import (CallbackQuery, Chat, ChatMemberLeft, ChatMemberMember, Contact, Document, Message,  # noqa: E402
                            MessageId, PhotoSize, Update, User, Video, VideoNote)
-from aiogram.exceptions import TelegramBadRequest                   # noqa: E402
+from aiogram.exceptions import TelegramBadRequest, TelegramMigrateToChat  # noqa: E402
 
 import bot as B                                                      # noqa: E402
 import content as C                                                  # noqa: E402
@@ -36,6 +36,7 @@ SENT = []          # (chat_id, method, params)
 SUBS = {}          # uid → "left" / "error"; остальные считаются подписанными
 PROBLEMS = []
 FAIL_CHATS = set()  # чаты, куда бот «не может писать» (бот не в группе)
+MIGRATE = {}        # группа → новый номер супергруппы
 _mid = [1000]
 
 
@@ -51,6 +52,9 @@ class FakeSession(BaseSession):
         SENT.append((params.get("chat_id"), name, params, method))
         if params.get("chat_id") in FAIL_CHATS and (name.startswith("Send") or name in ("GetChat", "ForwardMessage")):
             raise TelegramBadRequest(method=method, message="Bad Request: chat not found")
+        if params.get("chat_id") in MIGRATE and (name.startswith("Send") or name in ("GetChat", "ForwardMessage")):
+            raise TelegramMigrateToChat(method=method, message="Bad Request: group chat was upgraded to a supergroup chat",
+                                        migrate_to_chat_id=MIGRATE[params["chat_id"]])
         if name == "GetChatMember":
             uid = int(params["user_id"]); st = SUBS.get(uid, "member"); u = User(id=uid, is_bot=False, first_name="x")
             if st == "error":
@@ -647,21 +651,50 @@ async def new_bot_check():
     n0 = len(SENT)
     await B.warmup_media(bot)
     expect(not [x for x in SENT[n0:] if x[1] in ("SendPhoto", "SendVideo")], "повторный прогрев ничего не грузит")
-    # бот не в рабочей группе: заявка всё равно приходит Артёму, и он узнаёт о проблеме (03.11)
+    # 03.11: переписка — только Артёму; заявки — Артёму и в группу
+    n0 = len(SENT)
+    await B.to_team(bot, 9, "❓ Вопрос от Кати")
+    out = SENT[n0:]
+    expect(any(ch == 777 and "Вопрос от Кати" in (p.get("text") or "") for ch, n, p, m in out)
+           and not any(ch == -1001 for ch, n, p, m in out), "переписка (что пишут в чат) — только Артёму, не в группу")
+    n0 = len(SENT)
+    await B.notify_team(bot, 9, "📅 ЗАПИСЬ тест", team=True)
+    out = SENT[n0:]
+    expect(any(ch == 777 for ch, n, p, m in out) and any(ch == -1001 for ch, n, p, m in out), "заявка — и Артёму, и в группу")
+    # бот не может писать в группу: заявки всё равно приходят Артёму, предупреждение с текстом ошибки — не чаще раза в час
     FAIL_CHATS.add(-1001)
     B._team_warned.clear()
     n0 = len(SENT)
-    await B.to_team(bot, 9, "❓ Вопрос от Кати")
-    await B.to_team(bot, 9, "❓ Ещё вопрос")
+    await B.notify_team(bot, 9, "📅 ЗАПИСЬ раз", team=True)
+    await B.notify_team(bot, 9, "📅 ЗАПИСЬ два", team=True)
     to_artem = [p.get("text") or "" for ch, n, p, m in SENT[n0:] if ch == 777 and n == "SendMessage"]
-    expect(sum("Вопрос от Кати" in t for t in to_artem) == 1 and sum("Ещё вопрос" in t for t in to_artem) == 1,
-           "бота нет в группе — вопросы всё равно приходят Артёму")
-    expect(sum("Не могу писать в рабочую группу" in t for t in to_artem) == 1, "Артём один раз получил предупреждение «добавьте бота в группу»")
-    n0 = len(SENT)
+    expect(sum("ЗАПИСЬ раз" in t for t in to_artem) == 1 and sum("ЗАПИСЬ два" in t for t in to_artem) == 1,
+           "бот не может писать в группу — заявки всё равно приходят Артёму")
+    expect(sum("Не могу писать в рабочую группу" in t and "chat not found" in t for t in to_artem) == 1,
+           "Артёму — предупреждение с текстом ошибки, один раз")
     B._team_warned.clear()
+    n0 = len(SENT)
     await B.check_team_chats(bot)
-    expect(any("не видит рабочую группу" in (p.get("text") or "") for ch, n, p, m in SENT[n0:] if ch == 777),
+    expect(any("Не могу писать в рабочую группу" in (p.get("text") or "") for ch, n, p, m in SENT[n0:] if ch == 777),
            "при запуске бот проверяет группу и предупреждает Артёма")
+    FAIL_CHATS.clear()
+    # группа стала супергруппой — новый номер подхватывается сам и запоминается
+    MIGRATE[-1001] = -1009999
+    n0 = len(SENT)
+    await B.notify_team(bot, 9, "📅 ЗАПИСЬ после смены номера", team=True)
+    await settle()
+    expect(any(ch == -1009999 and "смены номера" in (p.get("text") or "") for ch, n, p, m in SENT[n0:]),
+           "группа сменила номер (супергруппа) — заявка ушла по новому номеру")
+    expect(B.group_id() == -1009999 and db.kv_get("work_chat_id") == "-1009999", "новый номер группы запомнен в базе")
+    with db._Ctx() as c:
+        c.execute(db._q("SELECT message_id FROM relay WHERE chat_id=%s ORDER BY message_id DESC LIMIT 1"), (-1009999,))
+        rid = db._one(c)["message_id"]
+    out = await feed(9, text="Ответ из новой группы", chat_id=-1009999, reply_to=rid)
+    expect(any(ch == 9 and "Ответ из новой группы" in (p.get("text") or "") for ch, n, p, m in out),
+           "ответ из группы с новым номером дошёл человеку")
+    MIGRATE.clear()
+    B._group["id"] = None
+    db.kv_set("work_chat_id", "0")
     FAIL_CHATS.clear()
     k = M.all_keys()[0]
     M.BOT_ID = 999

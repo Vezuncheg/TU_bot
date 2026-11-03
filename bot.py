@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F, Router, BaseMiddleware
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramMigrateToChat
 from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (BotCommand, CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -606,40 +606,81 @@ async def save_lead(bot, uid, s, status, notify=False, slot=None):
         for key in ("video_card", "video_battle"):
             if s.get(key):
                 vids.append((s[key], "Видео-визитка" if key == "video_card" else "Видео баттла"))
-    await notify_team(bot, uid, lead_card(u, s, status, slot), vids)
+    await notify_team(bot, uid, lead_card(u, s, status, slot), vids, team=True)
 
 
-_team_warned = set()
+_team_warned = {}         # чат → когда последний раз предупреждали Артёма (не чаще раза в час на чат)
+_group = {"id": None}     # номер рабочей группы; меняется сам, если Telegram сделал из группы супергруппу
 
 
-async def notify_team(bot, uid, text, videos=(), forward=None):
-    """Сообщение представителю: в личку Артёму и в рабочую группу (если задана). На каждое сообщение можно
-    ответить через «Ответить» — бот перешлёт ответ человеку. Не дошло в какой-то чат — Артём узнаёт об этом."""
-    fails = []
-    for chat in config.LEAD_CHATS:
+def group_id():
+    if _group["id"] is None:
+        g = config.LEADS_CHAT_ID if config.LEADS_CHAT_ID != config.ARTEM_CHAT_ID else 0
         try:
-            m = await bot.send_message(chat, text)
-            await asyncio.to_thread(db.relay_set, chat, m.message_id, uid)
-            for v, cap in videos:
-                if v.get("note"):
-                    vm = await bot.send_video_note(chat, v["id"], reply_to_message_id=m.message_id)
-                else:
-                    vm = await bot.send_video(chat, v["id"], reply_to_message_id=m.message_id, caption=cap)
-                bg(db.relay_set, chat, vm.message_id, uid)
-            if forward is not None:
-                fm = await forward.forward(chat)
-                bg(db.relay_set, chat, fm.message_id, uid)
-        except Exception as e:
-            log.warning(f"заявка/вопрос не дошли в чат {chat}: {e}")
-            fails.append((chat, e))
-    for chat, e in fails:
-        if chat != config.ARTEM_CHAT_ID and chat not in _team_warned and config.ARTEM_CHAT_ID:
-            _team_warned.add(chat)
+            g = int(db.kv_get("work_chat_id") or 0) or g      # номер после превращения в супергруппу (03.11)
+        except Exception:
+            pass
+        _group["id"] = g
+    return _group["id"]
+
+
+def team_chats(team=True):
+    """Куда слать: Артёму всегда; в рабочую группу — только заявки (team=True). Переписка — только Артёму (03.11)."""
+    out = [config.ARTEM_CHAT_ID] if config.ARTEM_CHAT_ID else []
+    g = group_id()
+    if g and (team or not out):
+        out.append(g)
+    return out
+
+
+def is_team_chat(msg):
+    return msg.chat.id in team_chats(True)
+
+
+async def warn_artem(bot, chat, e):
+    now = time.time()
+    if not config.ARTEM_CHAT_ID or chat == config.ARTEM_CHAT_ID or now - _team_warned.get(chat, 0) < 3600:
+        return
+    _team_warned[chat] = now
+    try:
+        await bot.send_message(config.ARTEM_CHAT_ID, f"⚠️ Не могу писать в рабочую группу {chat}: {e}\n"
+                               f"Заявки пока приходят только сюда. Перешлите это сообщение — разберёмся.")
+    except Exception:
+        pass
+
+
+async def _send_to(bot, chat, uid, text, videos, forward):
+    m = await bot.send_message(chat, text)
+    await asyncio.to_thread(db.relay_set, chat, m.message_id, uid)
+    for v, cap in videos:
+        if v.get("note"):
+            vm = await bot.send_video_note(chat, v["id"], reply_to_message_id=m.message_id)
+        else:
+            vm = await bot.send_video(chat, v["id"], reply_to_message_id=m.message_id, caption=cap)
+        bg(db.relay_set, chat, vm.message_id, uid)
+    if forward is not None:
+        fm = await forward.forward(chat)
+        bg(db.relay_set, chat, fm.message_id, uid)
+
+
+async def notify_team(bot, uid, text, videos=(), forward=None, team=True):
+    """Сообщение представителю. Заявки (team=True) — Артёму в чат с ботом и в рабочую группу; переписка
+    (team=False) — только Артёму. На каждое можно ответить через «Ответить» — бот перешлёт ответ человеку."""
+    for chat in team_chats(team):
+        try:
             try:
-                await bot.send_message(config.ARTEM_CHAT_ID, f"⚠️ Не могу писать в рабочую группу {chat}: {e}\n"
-                                       f"Добавьте бота в группу. Заявки пока приходят только сюда.")
-            except Exception:
-                pass
+                await _send_to(bot, chat, uid, text, videos, forward)
+            except TelegramMigrateToChat as e:
+                # Telegram превратил группу в супергруппу — у неё новый номер; запоминаем и шлём туда
+                new = e.migrate_to_chat_id
+                log.warning(f"рабочая группа {chat} стала супергруппой {new}")
+                _group["id"] = new
+                bg(db.kv_set, "work_chat_id", str(new))
+                chat = new
+                await _send_to(bot, chat, uid, text, videos, forward)
+        except Exception as e:
+            log.warning(f"заявка/сообщение не дошли в чат {chat}: {e}")
+            await warn_artem(bot, chat, e)
 
 
 async def forward_if_lead(bot, uid, text):
@@ -651,11 +692,12 @@ async def forward_if_lead(bot, uid, text):
         log.warning(f"forward_if_lead: {e}")
 
 
-async def to_team(bot, uid, text, forward=None):
-    """Сообщение представителю (вопрос, просьба познакомить) с возможностью ответить через бота."""
+async def to_team(bot, uid, text, forward=None, team=False):
+    """Сообщение представителю с возможностью ответить через бота. По умолчанию — переписка, только Артёму;
+    team=True — это заявка (просьба познакомить и т. п.), идёт и в рабочую группу."""
     u = await asyncio.to_thread(db.get_user, uid) or {"user_id": uid}
     who = f"@{u['username']}" if u.get("username") else f"<a href=\"tg://user?id={uid}\">{u.get('first_name') or 'профиль'}</a>"
-    await notify_team(bot, uid, f"{text}\nОт: {who} · id {uid}\n\n{C.LEAD_FORWARD_HINT}", forward=forward)
+    await notify_team(bot, uid, f"{text}\nОт: {who} · id {uid}\n\n{C.LEAD_FORWARD_HINT}", forward=forward, team=team)
 
 
 # =====================================================================
@@ -916,11 +958,11 @@ async def handle_action(bot, uid, s, a, arg, cb=None):
         bg(db.schedule, uid, "month", time.time() + 30 * 86400)
         return await bot.send_message(uid, C.MONTH_OK)
     if a == "meetpartner":
-        await to_team(bot, uid, "🤝 Просит разговор с ведущей-партнёром (из дожима)")
+        await to_team(bot, uid, "🤝 Просит разговор с ведущей-партнёром (из дожима)", team=True)
         return await bot.send_message(uid, C.MEETPARTNER_OK)
 
 
-@router.message(F.chat.id.in_(set(config.LEAD_CHATS)), F.reply_to_message)
+@router.message(is_team_chat, F.reply_to_message)
 async def h_relay(msg: Message):
     """Представитель ответил на карточку заявки (в личке Артёма или в группе) — пересылаем человеку."""
     uid = await asyncio.to_thread(db.relay_get, msg.chat.id, msg.reply_to_message.message_id)
@@ -1138,22 +1180,20 @@ async def set_avatar(bot):
 
 
 async def check_team_chats(bot):
-    """При запуске: куда пойдут заявки и доступны ли эти чаты (03.11: после смены бота заявки не доходили молча)."""
+    """При запуске: куда пойдут заявки и доступны ли эти чаты. Ошибка — Артёму, с текстом (03.11)."""
     if not config.ARTEM_CHAT_ID:
         log.warning("ARTEM_CHAT_ID не задан — заявки в личку не придут")
-    for chat in config.LEAD_CHATS:
+    for chat in team_chats(True):
         try:
-            await bot.get_chat(chat)
-            log.info(f"заявки: чат {chat} доступен")
+            c = await bot.get_chat(chat)
+            log.info(f"заявки: чат {chat} доступен ({c.type})")
+        except TelegramMigrateToChat as e:
+            log.warning(f"рабочая группа {chat} стала супергруппой {e.migrate_to_chat_id}")
+            _group["id"] = e.migrate_to_chat_id
+            await asyncio.to_thread(db.kv_set, "work_chat_id", str(e.migrate_to_chat_id))
         except Exception as e:
             log.warning(f"заявки: чат {chat} недоступен ({e})")
-            if chat != config.ARTEM_CHAT_ID and config.ARTEM_CHAT_ID:
-                _team_warned.add(chat)
-                try:
-                    await bot.send_message(config.ARTEM_CHAT_ID, f"⚠️ Бот не видит рабочую группу {chat}: {e}\n"
-                                           f"Добавьте бота в группу. Заявки пока приходят только сюда.")
-                except Exception:
-                    pass
+            await warn_artem(bot, chat, e)
 
 
 async def set_profile(bot):
