@@ -598,6 +598,43 @@ async def double_tap_check():
     B._last_tap.clear(); B._menu_last.clear()
 
 
+async def new_bot_check():
+    """Переезд на новый токен (03.11): имя и описание, аватарка, прогрев медиа — по одному разу на бота;
+    кэш file_id свой у каждого бота."""
+    print("\nНовый бот (переезд 03.11):")
+    import media as M
+    M.BOT_ID = bot.id
+    n0 = len(SENT)
+    await B.set_profile(bot)
+    await B.set_profile(bot)
+    names = [x[1] for x in SENT[n0:]]
+    expect(names.count("SetMyName") == 1 and names.count("SetMyShortDescription") == 1 and names.count("SetMyDescription") == 1,
+           "имя, короткое описание и описание ставятся один раз")
+    expect(len(C.BOT_NAME) <= 64 and len(C.BOT_ABOUT) <= 120 and len(C.BOT_DESCRIPTION) <= 512,
+           f"длины в лимитах Telegram (имя {len(C.BOT_NAME)}/64, коротко {len(C.BOT_ABOUT)}/120, описание {len(C.BOT_DESCRIPTION)}/512)")
+    B.config.SET_AVATAR = True
+    n0 = len(SENT)
+    await B.set_avatar(bot)
+    await B.set_avatar(bot)
+    B.config.SET_AVATAR = False
+    expect([x[1] for x in SENT[n0:]].count("SetMyProfilePhoto") == 1, "аватарка ставится один раз")
+    total = len(M.all_keys())
+    n0 = len(SENT)
+    await B.warmup_media(bot)
+    await settle()
+    up = [x for x in SENT[n0:] if x[1] in ("SendPhoto", "SendVideo")]
+    dels = [x for x in SENT[n0:] if x[1] == "DeleteMessage"]
+    expect(len(up) == total and all(x[0] == 777 for x in up), f"прогрев: все файлы ({len(up)} из {total}) — в личный чат Артёма")
+    expect(all(x[2].get("disable_notification") for x in up) and len(dels) == len(up), "прогрев без звука, каждое сообщение удалено")
+    n0 = len(SENT)
+    await B.warmup_media(bot)
+    expect(not [x for x in SENT[n0:] if x[1] in ("SendPhoto", "SendVideo")], "повторный прогрев ничего не грузит")
+    k = M.all_keys()[0]
+    M.BOT_ID = 999
+    expect(M._get(k) is None, "у другого бота свой кэш: file_id прежнего бота не используются")
+    M.BOT_ID = bot.id
+
+
 async def main():
     if os.path.exists(DB_FILE):
         os.remove(DB_FILE)
@@ -617,6 +654,7 @@ async def main():
     screen_check()
     await cache_check()
     await double_tap_check()
+    await new_bot_check()
     vids = [p.get("caption") or "" for ch, n, p, m in SENT if n == "SendVideo"]
     expect(any("опыт эфиров" in c.lower() and "Вопрос" in c for c in vids), "вопрос анкеты про опыт эфиров — видео баттла (В-08)")
     expect(any("3 вопроса перед консультацией" in c for c in vids), "перед консультацией — видео баттла (В-09), вопрос в подписи")

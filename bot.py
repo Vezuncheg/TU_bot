@@ -1109,14 +1109,50 @@ async def set_avatar(bot):
     if not config.SET_AVATAR:
         return
     try:
-        if await asyncio.to_thread(db.kv_get, "avatar_v2"):
+        flag = f"avatar_v2_{bot.id}"         # 03.11: флаг на каждого бота — сменили токен, аватарка ставится заново
+        if await asyncio.to_thread(db.kv_get, flag):
             return
         await bot.set_my_profile_photo(photo=InputProfilePhotoAnimated(
             animation=FSInputFile(media.path_of("video:avatar")), main_frame_timestamp=0.0))
-        await asyncio.to_thread(db.kv_set, "avatar_v2", str(int(time.time())))
+        await asyncio.to_thread(db.kv_set, flag, str(int(time.time())))
         log.info("аватарка бота поставлена")
     except Exception as e:
         log.warning(f"аватарка: {e}")
+
+
+async def set_profile(bot):
+    """Имя, описание и короткое описание бота — один раз на бота и версию текстов (03.11, переезд на новый токен)."""
+    flag = f"profile_{C.PROFILE_VER}_{bot.id}"
+    try:
+        if await asyncio.to_thread(db.kv_get, flag):
+            return
+        await bot.set_my_name(name=C.BOT_NAME)
+        await bot.set_my_short_description(short_description=C.BOT_ABOUT)
+        await bot.set_my_description(description=C.BOT_DESCRIPTION)
+        await asyncio.to_thread(db.kv_set, flag, str(int(time.time())))
+        log.info("имя и описание бота поставлены")
+    except Exception as e:
+        log.warning(f"профиль бота: {e}")
+
+
+async def warmup_media(bot):
+    """Прогрев медиа: в служебный чат, если задан MEDIA_WARMUP_CHAT_ID, иначе — в личный чат Артёма с ботом
+    (тихо, каждое сообщение сразу удаляется; предложено 27.10, принято 03.11)."""
+    chat = config.MEDIA_WARMUP_CHAT_ID or config.ARTEM_CHAT_ID
+    miss = [k for k in media.all_keys() if not media._get(k)]
+    if not miss:
+        return
+    if not chat:
+        log.warning(f"прогрев медиа: некуда грузить, {len(miss)} файлов — первый показ каждого будет медленным")
+        return
+    try:
+        await bot.send_chat_action(chat, "upload_photo")
+    except Exception as e:
+        log.warning(f"прогрев медиа: чат {chat} недоступен ({e}) — "
+                    f"нажмите «Старт» в боте или задайте MEDIA_WARMUP_CHAT_ID, затем перезапустите сервис")
+        return
+    log.info(f"прогрев медиа: {len(miss)} файлов в чат {chat}")
+    await media.warmup(bot, chat)
 
 
 def build_dp():
@@ -1142,17 +1178,13 @@ async def main():
     await asyncio.to_thread(migrate.run)
     media.load()
     bot = Bot(config.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML, link_preview_is_disabled=True))
+    media.BOT_ID = bot.id           # id из токена: кэш file_id — свой у каждого бота (03.11)
     dp = build_dp()
     await bot.set_my_commands([BotCommand(command="start", description="🚀 Начать заново"),
                                BotCommand(command="menu", description="☰ Меню")])
     asyncio.create_task(set_avatar(bot))
-    if config.MEDIA_WARMUP_CHAT_ID:
-        asyncio.create_task(media.warmup(bot, config.MEDIA_WARMUP_CHAT_ID))
-    else:
-        miss = [k for k in media.all_keys() if not media._get(k)]
-        if miss:
-            log.warning(f"MEDIA_WARMUP_CHAT_ID не задан: {len(miss)} картинок и видео ещё не загружены в Telegram — "
-                        f"первый показ каждой будет медленным")
+    asyncio.create_task(set_profile(bot))
+    asyncio.create_task(warmup_media(bot))
     asyncio.create_task(scheduler(bot))
     log.info("TeamUniverse bot started (v2)")
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())

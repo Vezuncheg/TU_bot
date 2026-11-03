@@ -16,6 +16,7 @@ MEDIA = os.path.join(HERE, "media")
 _cache = {}          # key@отпечаток файла → file_id (заменили файл — отпечаток другой, грузим заново)
 _fp = {}             # key → отпечаток содержимого
 _manifest = {}       # key → {w, h, dur} для видео
+BOT_ID = 0           # id бота из токена: file_id действует только у того бота, который файл загрузил (переезд 03.11)
 
 
 def load():
@@ -59,14 +60,16 @@ def all_keys():
 
 
 def _ck(key):
-    """Ключ кэша: имя + отпечаток содержимого файла."""
+    """Ключ кэша: id бота + имя + отпечаток содержимого файла.
+    С 03.11 (переезд на @TeamUniverse_app) в ключе id бота: file_id прежнего бота новому не подходят,
+    поэтому сменили токен — кэш начинается с нуля сам, чистить таблицу не нужно."""
     if key not in _fp:
         try:
             with open(path_of(key), "rb") as f:
                 _fp[key] = hashlib.sha1(f.read()).hexdigest()[:10]
         except OSError:
             _fp[key] = ""
-    return f"{key}@{_fp[key]}"
+    return f"{BOT_ID}:{key}@{_fp[key]}" if BOT_ID else f"{key}@{_fp[key]}"
 
 
 def _get(key):
@@ -79,7 +82,7 @@ def _remember(key, file_id):
     asyncio.get_running_loop().run_in_executor(None, db.media_set, ck, file_id)
 
 
-async def send(bot: Bot, chat_id, key, caption=None, reply_markup=None):
+async def send(bot: Bot, chat_id, key, caption=None, reply_markup=None, silent=None):
     """Отправить медиа по ключу. Возвращает Message.
     Подпись — над картинкой или видео (show_caption_above_media, правило 26.10): человек сначала видит текст."""
     above = True if caption else None
@@ -88,7 +91,7 @@ async def send(bot: Bot, chat_id, key, caption=None, reply_markup=None):
     fid = _get(key)
     for attempt in (0, 1):
         src = fid if (fid and attempt == 0) else FSInputFile(path_of(key))
-        if not isinstance(src, str):
+        if not isinstance(src, str) and not silent:
             # 27.10: файл грузится в Telegram впервые — это долго; пусть человек видит «отправляет фото/видео…»
             act = {"card": "upload_photo", "video": "upload_video"}.get(kind, "upload_document")
             try:
@@ -98,16 +101,18 @@ async def send(bot: Bot, chat_id, key, caption=None, reply_markup=None):
         try:
             if kind == "card":
                 m = await bot.send_photo(chat_id, src, caption=caption or None, reply_markup=reply_markup,
-                                         show_caption_above_media=above)
+                                         show_caption_above_media=above, disable_notification=silent)
                 new_id = m.photo[-1].file_id if m.photo else None
             elif kind == "video":
                 meta = _manifest.get(key, {})
                 m = await bot.send_video(chat_id, src, caption=caption or None, reply_markup=reply_markup,
                                          width=meta.get("w"), height=meta.get("h"), duration=meta.get("dur"),
-                                         supports_streaming=True, show_caption_above_media=above)
+                                         supports_streaming=True, show_caption_above_media=above,
+                                         disable_notification=silent)
                 new_id = m.video.file_id if m.video else None
             else:
-                m = await bot.send_document(chat_id, src, caption=caption or None, reply_markup=reply_markup)
+                m = await bot.send_document(chat_id, src, caption=caption or None, reply_markup=reply_markup,
+                                            disable_notification=silent)
                 new_id = m.document.file_id if m.document else None
             if new_id and new_id != fid:
                 _remember(key, new_id)
@@ -136,13 +141,15 @@ def remember_from(key, message):
 
 
 async def warmup(bot: Bot, chat_id):
-    """Один раз загрузить все медиа в служебный чат и запомнить file_id."""
+    """Один раз загрузить все медиа в служебный чат и запомнить file_id.
+    Отправка без звука, каждое сообщение сразу удаляется. Уже загруженные файлы пропускаются,
+    поэтому после первого раза прогрев занимает секунды."""
     n = 0
     for key in all_keys():
         if _get(key):
             continue
         try:
-            m = await send(bot, chat_id, key)
+            m = await send(bot, chat_id, key, silent=True)
             n += 1
             try:
                 await bot.delete_message(chat_id, m.message_id)
