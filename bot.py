@@ -511,7 +511,8 @@ SPECIAL = {"under18": sc_under18, "red": sc_red, "offer": sc_offer, "aIntro": sc
            "bQ1": lambda b, u, s, **k: sc_bQ(b, u, s, 0), "bQ2": lambda b, u, s, **k: sc_bQ(b, u, s, 1),
            "bQ3": lambda b, u, s, **k: sc_bQ(b, u, s, 2),
            "guide": lambda b, u, s, **k: sc_material(b, u, s, "guide"),
-           "check": lambda b, u, s, **k: sc_material(b, u, s, "check")}
+           "check": lambda b, u, s, **k: sc_material(b, u, s, "check"),
+           "lang": lambda b, u, s, **k: sc_material(b, u, s, "lang")}
 
 
 # ---------------- тест ----------------
@@ -706,7 +707,7 @@ async def to_team(bot, uid, text, forward=None, team=False):
 # старые метки (бот до v2): test, casting, antiscam, guide30, franchise — ведут туда же по смыслу.
 # franchise → «Партнёр TeamUniverse» (решение Артёма 23.10)
 ROUTES_EXACT = {"test": "testIntro", "casting": "aIntro", "team": "aIntro", "franchise": "p1", "partner": "p1",
-                "paket": "p1", "guide30": "guide", "guide": "guide", "antiscam": "check", "check": "check",
+                "paket": "p1", "guide30": "guide", "guide": "guide", "antiscam": "check", "check": "check", "lang": "lang",
                 "menu": "menu", "about": "about", "calc": "calc"}
 
 

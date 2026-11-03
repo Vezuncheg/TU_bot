@@ -442,6 +442,14 @@ async def flow_materials():
     SUBS[507] = "member"
     out = await feed(507, data="g:guide")
     expect(any(n == "SendDocument" for _, n, p, m in out), "подписалась → гайд уходит файлом")
+    # 03.11: языковая шпаргалка — в меню материалов, тоже после подписки
+    expect(any(b[1] == "g:lang" for row in C.S["materials"][0]["kb"] for b in row), "в материалах есть «Языковая шпаргалка»")
+    SUBS[509] = "left"
+    out = await feed(509, text="/start lang")
+    expect(not any(n == "SendDocument" for _, n, p, m in out), "?start=lang без подписки → файла нет")
+    SUBS[509] = "member"
+    out = await feed(509, data="g:lang")
+    expect(any(n == "SendDocument" for _, n, p, m in out), "подписалась → шпаргалка уходит файлом")
     SUBS[508] = "error"
     out = await feed(508, text="/start guide30")
     expect(any(n == "SendDocument" for _, n, p, m in out), "проверить подписку нельзя (бот не админ) → материал всё равно отдаём")
