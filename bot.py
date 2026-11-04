@@ -588,6 +588,21 @@ def lead_card(u, s, lead_status, slot=None):
     return "\n".join(lines)
 
 
+def staff_reminder(lead, kind, d):
+    """Напоминание представителю о разговоре: кто, когда, как связаться (04.11, просьба Артёма)."""
+    uid = lead["user_id"]
+    name = (lead.get("name") or "").strip() or "—"
+    uname = f"@{lead['username']}" if lead.get("username") else f"<a href=\"tg://user?id={uid}\">профиль</a>"
+    br = "👥 В команде" if lead.get("branch") == "team" else "🚀 Партнёр"
+    way = f"📞 звонок · {lead.get('phone') or 'телефон не указан'}" if lead.get("way") == "call" else "💬 переписка в Telegram"
+    lines = [f"{C.STAFF_REM[kind]} · {br}", f"{name} · {uname} · id {uid}",
+             f"Когда: <b>{dd(d)} {hm(d)}</b> (МСК) · {way}"]
+    if lead.get("status") == "перенесена":
+        lines.append("🔁 Время уже переносили")
+    lines += ["", C.LEAD_FORWARD_HINT]
+    return "\n".join(lines)
+
+
 async def save_lead(bot, uid, s, status, notify=False, slot=None):
     u = await asyncio.to_thread(db.get_user, uid) or {"user_id": uid}
     fields = dict(branch=s.get("br"), answers=s.get("ans") or {}, way=s.get("way"), phone=s.get("phone"), status=status,
@@ -1110,6 +1125,8 @@ async def run_scheduled(bot, row):
             if not lead or lead.get("slot_ts") != p.get("slot") or lead.get("status") not in ("записана", "перенесена"):
                 return
             d = msk(p["slot"])
+            # 04.11: то же напоминание — представителю (Артёму и в группу), первым: дойдёт, даже если человек заблокировал бота
+            await notify_team(bot, uid, staff_reminder(lead, kind, d), team=True)
             if kind == "rem24":
                 who = C.WHO_CALL if lead.get("way") == "call" else C.WHO_CHAT
                 await bot.send_message(uid, C.REM24.format(time=hm(d), who=who),

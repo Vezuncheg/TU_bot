@@ -367,6 +367,9 @@ async def flow_partner():
     await run_due(force=False)
     txt = " ".join(p.get("text") or "" for ch, n, p, m in SENT[n0:] if ch == uid)
     expect("Через 15 минут представитель напишет" in txt and "Через 2 часа" in txt, "напоминания о разговоре приходят")
+    staff = {ch: " ".join(p.get("text") or "" for c2, n, p, m in SENT[n0:] if c2 == ch) for ch in (B.config.ARTEM_CHAT_ID, B.group_id())}
+    expect(all("Через 15 минут разговор" in t and "Через 2 часа разговор" in t and f"id {uid}" in t for t in staff.values()),
+           "напоминания о разговоре приходят и Артёму, и в рабочую группу")
 
 
 async def flow_under18():
