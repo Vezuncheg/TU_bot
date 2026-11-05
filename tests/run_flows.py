@@ -453,6 +453,14 @@ async def flow_materials():
     SUBS[509] = "member"
     out = await feed(509, data="g:lang")
     expect(any(n == "SendDocument" for _, n, p, m in out), "подписалась → шпаргалка уходит файлом")
+    # 05.11: презентация TeamUniverse — исходный файл, в меню материалов и по ?start=presentation, после подписки
+    expect(any(b[1] == "g:presentation" for row in C.S["materials"][0]["kb"] for b in row), "в материалах есть «Презентация TeamUniverse»")
+    SUBS[511] = "left"
+    out = await feed(511, text="/start presentation")
+    expect(not any(n == "SendDocument" for _, n, p, m in out), "?start=presentation без подписки → файла нет")
+    SUBS[511] = "member"
+    out = await feed(511, data="g:presentation")
+    expect(any(n == "SendDocument" for _, n, p, m in out), "подписалась → презентация уходит файлом")
     SUBS[508] = "error"
     out = await feed(508, text="/start guide30")
     expect(any(n == "SendDocument" for _, n, p, m in out), "проверить подписку нельзя (бот не админ) → материал всё равно отдаём")
@@ -486,11 +494,12 @@ def media_check():
             missing.append(k)
             continue
         size = os.path.getsize(p)
-        lim = 200 * 1024 if k.startswith("card:") else (5 * 1024 * 1024 if k.startswith("video:") else 20 * 1024 * 1024)
+        # документы: бот может отправить файл до 50 МБ (05.11: презентация Артёма — 22 МБ, исходник без сжатия)
+        lim = 200 * 1024 if k.startswith("card:") else (5 * 1024 * 1024 if k.startswith("video:") else 50 * 1024 * 1024)
         if size > lim:
             big.append(f"{k} {size // 1024} КБ")
     expect(not missing, f"все файлы на месте ({len(keys)})" + (f" — нет: {missing}" if missing else ""))
-    expect(not big, "картинки ≤ 200 КБ, видео ≤ 5 МБ" + (f" — больше: {big}" if big else ""))
+    expect(not big, "картинки ≤ 200 КБ, видео ≤ 5 МБ, документы ≤ 50 МБ" + (f" — больше: {big}" if big else ""))
     # повторы: один и тот же файл на разных экранах
     import hashlib
     seen = {}
